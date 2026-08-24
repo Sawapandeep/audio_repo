@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      PYTHON_BIN: python3
+      DOWNLOAD_TEMP_DIR: /tmp/audiodrop-jobs
+      MAX_CONCURRENT_JOBS: 2
+    volumes:
+      - audiodrop_jobs:/tmp/audiodrop-jobs
+
+volumes:
+  audiodrop_jobs:

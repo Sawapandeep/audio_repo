@@ -1,0 +1,12 @@
+yt-dlp==2026.08.19
+# Match the yt-dlp release used by the deployment environment.
+# These are the default runtime dependencies declared by the supplied yt-dlp source snapshot.
+brotli>=1.2.0
+certifi>=2026.7.22
+mutagen>=1.48.1
+pycryptodomex>=3.23.0
+requests>=2.34.2,<3
+urllib3>=2.7.0,<3
+websockets>=17.0.1
+# yt-dlp-ejs is required by the supplied yt-dlp snapshot for supported JS-based extraction.
+yt-dlp-ejs==0.8.0

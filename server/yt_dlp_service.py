@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+import json
+import mimetypes
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+try:
+    import yt_dlp
+except Exception as exc:
+    print(json.dumps({'error': f'yt-dlp is not installed or could not be imported: {exc}'}))
+    raise SystemExit(1)
+
+ALLOWED_FORMATS = {
+    'mp3': ('audio/mpeg', True),
+    'm4a': ('audio/mp4', True),
+    'opus': ('audio/ogg', True),
+    'wav': ('audio/wav', False),
+    'flac': ('audio/flac', False),
+}
+BITRATES = {128, 192, 256, 320}
+
+
+def clean_name(value: str, fallback='audio') -> str:
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', value or '').strip().rstrip('.')
+    value = re.sub(r'\s+', ' ', value)
+    return (value or fallback)[:180]
+
+
+def validate_format(ext):
+    if ext not in ALLOWED_FORMATS:
+        raise ValueError('Unsupported output format.')
+
+
+def ffmpeg_ok():
+    path = shutil.which('ffmpeg')
+    if not path:
+        raise RuntimeError('FFmpeg is required for audio conversion but was not found.')
+    return path
+
+
+def available_output_formats():
+    ffmpeg_ok()
+    enc = subprocess.run(['ffmpeg','-hide_banner','-encoders'], capture_output=True, text=True, timeout=10).stdout
+    checks = {
+        'mp3': 'libmp3lame' in enc or ' mp3 ' in enc,
+        'm4a': any(x in enc for x in ('aac','libfdk_aac')),
+        'opus': 'libopus' in enc or ' opus ' in enc,
+        'wav': 'pcm_s16le' in enc,
+        'flac': 'flac' in enc,
+    }
+    return [{'ext': ext, 'lossy': ALLOWED_FORMATS[ext][1]} for ext in ALLOWED_FORMATS if checks.get(ext)]
+
+
+def base_opts():
+    return {
+        'quiet': True,
+        'no_warnings': True,
+        'noprogress': True,
+        'nocheckcertificate': False,
+        'cachedir': False,
+    }
+
+
+def source_formats(info):
+    result=[]; bitrates=set()
+    for f in info.get('formats') or []:
+        acodec=f.get('acodec')
+        if not acodec or acodec == 'none':
+            continue
+        ext=f.get('ext')
+        if ext:
+            result.append(ext)
+        abr=f.get('abr')
+        if abr:
+            try: bitrates.add(int(round(float(abr))))
+            except Exception: pass
+    unique=[]
+    for x in result:
+        if x not in unique: unique.append(x)
+    return unique, sorted(bitrates)
+
+
+def entry_url(entry):
+    return entry.get('webpage_url') or entry.get('original_url') or entry.get('url')
+
+
+def analyze(url):
+    formats = available_output_formats()
+    opts = base_opts() | {'skip_download': True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    is_playlist = info.get('_type') == 'playlist' or bool(info.get('entries'))
+    if not is_playlist:
+        src, rates = source_formats(info)
+        return {
+            'type':'single', 'title':info.get('title') or 'Untitled', 'thumbnail':info.get('thumbnail'),
+            'uploader':info.get('uploader') or info.get('channel'), 'duration':info.get('duration'), 'url':url,
+            'formats': [{'ext':x,'source':True,'lossy':x not in ('wav','flac')} for x in src],
+            'sourceBitrates':rates, 'outputFormats':formats,
+        }
+
+    tracks=[]
+    for idx, entry in enumerate(info.get('entries') or [], start=1):
+        if not entry: continue
+        u=entry_url(entry)
+        if not u: continue
+        # Flat playlist extraction avoids downloading the playlist. We only inspect metadata for each entry.
+        tracks.append({'id':str(entry.get('id') or idx), 'title':entry.get('title') or f'Track {idx}', 'uploader':entry.get('uploader') or entry.get('channel'), 'duration':entry.get('duration'), 'url':u, 'index':idx})
+    return {
+        'type':'playlist', 'title':info.get('title') or 'Playlist', 'thumbnail':info.get('thumbnail'),
+        'uploader':info.get('uploader') or info.get('channel'), 'url':url,
+        'formats':[], 'sourceBitrates':[], 'outputFormats':formats, 'tracks':tracks,
+    }
+
+
+def progress_hook_factory(total, emit):
+    completed=0; current=''
+    def hook(d):
+        nonlocal completed, current
+        if d.get('status') == 'finished':
+            completed += 1
+        current = d.get('info_dict', {}).get('title') or current
+        emit({'type':'progress','completed':completed,'total':total,'current':current})
+    return hook
+
+
+def download_opts(output_dir, ext, quality, hook=None):
+    validate_format(ext); ffmpeg_ok()
+    if quality not in BITRATES: quality=192
+    # yt-dlp receives a fixed, safe argument structure. No user-controlled shell command is constructed.
+    post = {'key':'FFmpegExtractAudio','preferredcodec':ext}
+    if ALLOWED_FORMATS[ext][1]: post['preferredquality']=str(quality)
+    return base_opts() | {
+        'format':'bestaudio/best',
+        'outtmpl': str(Path(output_dir) / '%(title).180B [%(id)s].%(ext)s'),
+        'noplaylist': True,
+        'postprocessors':[post],
+        'progress_hooks':[hook] if hook else [],
+        'restrictfilenames': False,
+        'windowsfilenames': True,
+    }
+
+
+def download_single(url, ext, quality):
+    temp=tempfile.mkdtemp(prefix='audiodrop-')
+    try:
+        opts=download_opts(temp, ext, quality)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info=ydl.extract_info(url, download=True)
+        files=[p for p in Path(temp).iterdir() if p.is_file() and p.suffix.lower().lstrip('.') == ext]
+        if not files: raise RuntimeError('yt-dlp completed but no converted audio file was produced.')
+        file=files[0]
+        return {'filePath':str(file),'filename':clean_name(info.get('title') or 'audio')+'.'+ext,'mime':ALLOWED_FORMATS[ext][0]}
+    except Exception:
+        shutil.rmtree(temp, ignore_errors=True)
+        raise
+
+
+def download_playlist(payload):
+    output_dir=Path(payload['outputDir']); output_dir.mkdir(parents=True,exist_ok=True)
+    url=payload['url']; ext=payload['format']; quality=int(payload.get('quality') or 192); selected=set(str(x) for x in payload.get('selected') or [])
+    # First resolve playlist entries again through yt-dlp. The URL and selected IDs are validated values from our app.
+    opts=base_opts() | {'skip_download':True,'extract_flat':True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info=ydl.extract_info(url, download=False)
+    entries=[e for e in (info.get('entries') or []) if e and str(e.get('id')) in selected]
+    if not entries: raise RuntimeError('None of the selected playlist tracks could be resolved.')
+    done=0; total=len(entries)
+    def emit(msg):
+        msg['completed']=done; msg['total']=total; print(json.dumps(msg), flush=True)
+    for entry in entries:
+        u=entry_url(entry)
+        if not u: continue
+        hook=progress_hook_factory(total, emit)
+        opts=download_opts(str(output_dir), ext, quality, hook)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.extract_info(u, download=True)
+        done += 1
+        emit({'type':'progress','completed':done,'total':total,'current':entry.get('title') or 'Track'})
+    zip_path=output_dir / 'audio.zip'
+    with zipfile.ZipFile(zip_path,'w',zipfile.ZIP_DEFLATED) as z:
+        for p in output_dir.iterdir():
+            if p.is_file() and p != zip_path:
+                safe=clean_name(p.stem)+p.suffix
+                z.write(p, arcname=safe)
+    # Cleanup individual files after archive creation.
+    for p in output_dir.iterdir():
+        if p.is_file() and p != zip_path: p.unlink(missing_ok=True)
+    print(json.dumps({'type':'result','filePath':str(zip_path)}), flush=True)
+
+
+def main():
+    payload=json.loads(sys.stdin.read())
+    action=payload.get('action')
+    if action=='analyze': result=analyze(payload['url']); print(json.dumps(result), flush=True); return
+    if action=='download_single': result=download_single(payload['url'],payload.get('format','mp3'),int(payload.get('quality') or 192)); print(json.dumps(result), flush=True); return
+    if action=='download_playlist': download_playlist(payload); return
+    raise ValueError('Unknown action.')
+
+try:
+    main()
+except Exception as exc:
+    print(json.dumps({'error': str(exc)}), flush=True)
+    raise SystemExit(1)
