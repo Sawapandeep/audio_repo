@@ -30,7 +30,11 @@ async function run(job:Job, input:{url:string;format:string;quality:number;selec
   const dir = path.join(tempRoot, job.id); await fs.mkdir(dir, {recursive:true});
   try {
     job.status='running';
-    const child = spawn(process.env.PYTHON_BIN || 'python3', [script], {env:{...process.env, ...(process.env.YT_DLP_PYTHONPATH ? {PYTHONPATH:process.env.YT_DLP_PYTHONPATH}:{})}, stdio:['pipe','pipe','pipe']});
+    const child = spawn(
+      process.env.PYTHON_BIN ||
+        (process.platform === 'win32' ? 'python' : 'python3'),
+      [script],
+      {env:{...process.env, ...(process.env.YT_DLP_PYTHONPATH ? {PYTHONPATH:process.env.YT_DLP_PYTHONPATH}:{})}, stdio:['pipe','pipe','pipe']});
     let stderr=''; let last='';
     child.stderr.on('data', c=>stderr += c.toString());
     child.stdout.setEncoding('utf8');

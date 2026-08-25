@@ -14,7 +14,8 @@ export async function POST(request: Request) {
     const url = validateSourceUrl(body?.url);
     const format = typeof body?.format === 'string' ? body.format : 'mp3';
     const quality = Number(body?.quality || 192);
-    const result = await runYtDlp({ action: 'download_single', url, format, quality }) as { filePath:string; filename:string; mime:string };
+    const includeId = Boolean(body?.includeId);
+    const result = await runYtDlp({ action: 'download_single', url, format, quality, includeId }) as { filePath:string; filename:string; mime:string };
     filePath = result.filePath;
     const data = await fs.readFile(filePath);
     const filename = result.filename.replace(/[\\/]/g, '_');

@@ -6,7 +6,8 @@ const script = path.join(root, 'server', 'yt_dlp_service.py');
 
 export function runYtDlp(payload: unknown): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const python = process.env.PYTHON_BIN || 'python3';
+    // const python = process.env.PYTHON_BIN || 'python3';
+    const python = process.env.PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3');
     const env = { ...process.env };
     if (process.env.YT_DLP_PYTHONPATH) env.PYTHONPATH = process.env.YT_DLP_PYTHONPATH;
     const child = spawn(python, [script], { env, stdio: ['pipe', 'pipe', 'pipe'] });

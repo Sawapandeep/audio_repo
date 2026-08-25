@@ -147,7 +147,7 @@ def download_opts(output_dir, ext, quality, hook=None):
     }
 
 
-def download_single(url, ext, quality):
+def download_single(url, ext, quality, include_id=False):
     temp=tempfile.mkdtemp(prefix='audiodrop-')
     try:
         opts=download_opts(temp, ext, quality)
@@ -156,7 +156,13 @@ def download_single(url, ext, quality):
         files=[p for p in Path(temp).iterdir() if p.is_file() and p.suffix.lower().lstrip('.') == ext]
         if not files: raise RuntimeError('yt-dlp completed but no converted audio file was produced.')
         file=files[0]
-        return {'filePath':str(file),'filename':clean_name(info.get('title') or 'audio')+'.'+ext,'mime':ALLOWED_FORMATS[ext][0]}
+        filename=clean_name(info.get('title') or 'audio')
+        if include_id:
+            video_id=clean_name(str(info.get('id') or 'unknown'))
+            filename=f'{filename} [{video_id}].{ext}'
+        else:
+            filename=f'{filename}.{ext}'
+        return {'filePath':str(file),'filename':filename,'mime':ALLOWED_FORMATS[ext][0]}
     except Exception:
         shutil.rmtree(temp, ignore_errors=True)
         raise
@@ -199,7 +205,7 @@ def main():
     payload=json.loads(sys.stdin.read())
     action=payload.get('action')
     if action=='analyze': result=analyze(payload['url']); print(json.dumps(result), flush=True); return
-    if action=='download_single': result=download_single(payload['url'],payload.get('format','mp3'),int(payload.get('quality') or 192)); print(json.dumps(result), flush=True); return
+    if action=='download_single': result=download_single(payload['url'],payload.get('format','mp3'),int(payload.get('quality') or 192),bool(payload.get('includeId'))); print(json.dumps(result), flush=True); return
     if action=='download_playlist': download_playlist(payload); return
     raise ValueError('Unknown action.')
 
