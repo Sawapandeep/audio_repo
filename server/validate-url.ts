@@ -1,3 +1,4 @@
+
 const allowedHosts = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be']);
 
 export function validateSourceUrl(input: unknown): string {

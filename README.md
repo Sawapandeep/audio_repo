@@ -1,55 +1,44 @@
-# AudioDrop — yt-dlp Audio Downloader
+# Sync Review + SpeedSync + Preferences — file drop-in guide
 
-Phase 1 Next.js application around the existing yt-dlp extraction engine, with playlist synchronization.
+These files replace/add to your EXISTING working AudioDrop repo (the one
+with Sync already working via the browser confirm() popup). Nothing else
+in your repo needs to change — no new dependencies, no backend/Python
+changes beyond the one route below.
 
-## Implemented PRD
+## New files (add these)
+- lib/fsTypes.ts           — shared File System Access API types
+- lib/directoryStore.ts    — IndexedDB persistence for the selected folder handle
+- lib/preferences.ts       — cookie persistence for format/quality + last-5 playlist history
 
-The supplied PRD asks for a yt-dlp clone with a sync/repository-style function: when a user's YouTube playlist gains a song, scan the local download folder and download the song only when it is not already present.
+## Replaced files (overwrite these)
+- app/page.tsx             — adds the Sync Review modal, SpeedSync section,
+                              folder-handle restore on load, and preference
+                              persistence. Normal single/playlist download
+                              flow is unchanged.
+- app/globals.css           — added styles for the modal, review list, and
+                              SpeedSync cards; nothing else was touched.
+- app/api/sync/route.ts     — now returns the FULL track list (each tagged
+                              existing/missing) plus outputFormats, instead
+                              of just a missing[] array + count. This is
+                              required for the three-way Review screen.
 
-The implementation adds:
+## What changed in the sync UX
+- "Sync now" / "SpeedSync" no longer trigger window.confirm() — they open
+  a bottom-sheet "Sync Review" modal showing:
+  - Already in folder / New-missing / Local-only counts
+  - A per-track list (missing tracks are checkboxed, pre-selected)
+  - Shared format/quality selectors (same as normal downloads)
+  - "Download N New Songs" to confirm
+- SpeedSync cards appear once you've completed at least one sync — they
+  remember the last 5 playlists (cookie) and re-run analyze+scan on click,
+  but ALWAYS show the Review screen first — never auto-downloads.
+- The selected folder handle is now persisted in IndexedDB, so returning
+  visitors don't have to re-pick it (subject to the browser still honoring
+  the permission — a "Reconnect folder" button appears if it needs re-
+  confirming, which requires a click since permission prompts need a user
+  gesture).
 
-- **Playlist Sync** panel in the existing mobile-first UI.
-- User selects the local audio folder through the browser's File System Access API.
-- The app scans the selected folder for AudioDrop filenames containing YouTube video IDs such as `Song Title [VIDEO_ID].mp3`.
-- `/api/sync` analyzes the playlist and returns only tracks whose video IDs are absent from the local folder.
-- Missing tracks are downloaded through the existing yt-dlp/FFmpeg backend and written directly into the selected folder when browser folder-write access is available.
-- A manual **Sync now** action.
-- Optional automatic checking every five minutes while the page is open. If new tracks are detected, the user is prompted before they are downloaded.
-- Existing single-video and bulk-playlist download flows remain intact.
-
-## Important browser limitation
-
-A normal website cannot silently watch a user's arbitrary filesystem or continuously run when the page is closed. Automatic checking therefore works only while AudioDrop is open, and the browser must grant folder access.
-
-The sync mechanism intentionally uses YouTube video IDs rather than title matching. This avoids false duplicates caused by title changes, punctuation, or different metadata.
-
-If the browser does not support the File System Access API, normal download behavior can still be used, but direct writing into the selected folder is not available.
-
-## Architecture
-
-- Next.js App Router frontend + Node route handlers
-- Python service for yt-dlp and FFmpeg
-- Temporary server-side files only for normal downloads
-- Single downloads are returned directly to the browser
-- Playlist downloads run as background jobs and are returned as a ZIP
-- Sync downloads are streamed to the browser and written to the user-selected directory
-- No accounts, database, history, cloud storage, payments, or analytics
-
-## Setup
-
-1. Install Node.js 20+.
-2. Install Python 3.10+.
-3. Install/import the configured yt-dlp version.
-4. Put FFmpeg on PATH.
-5. Copy `.env.example` to `.env.local` and set `PYTHON_BIN` if required.
-6. If using a source checkout, set `YT_DLP_PYTHONPATH` to its parent directory.
-7. Run `npm install`.
-8. Run `npm run dev`.
-
-The supplied runtime pins `yt-dlp==2026.08.19` and `yt-dlp-ejs==0.8.0`.
-
-## Production
-
-Use a persistent Node/Python host or container for Phase 1. The playlist job manager is process-local and is not suitable for a stateless serverless runtime. The sync watcher is likewise browser-local and only operates while the page is open.
-
-A later phase can replace the process-local job manager and browser polling with a durable queue/background worker if always-on playlist monitoring is required.
+## Verified
+Type-checked with `tsc --noEmit` against this exact file set (page.tsx,
+the new lib files, the updated sync route, and your existing unchanged
+server/*.py + server/*.ts + other API routes) — no type errors.
