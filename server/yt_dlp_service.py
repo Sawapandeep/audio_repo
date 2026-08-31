@@ -67,6 +67,21 @@ def base_opts():
     }
 
 
+def apply_youtube_auth(opts, auth):
+    if not auth:
+        return opts
+    cookies_path = auth.get('cookiesPath')
+    if cookies_path:
+        path = Path(str(cookies_path))
+        if not path.is_file():
+            raise RuntimeError('The temporary YouTube access session is no longer available.')
+        opts['cookiefile'] = str(path)
+    user_agent = auth.get('userAgent')
+    if user_agent:
+        opts['http_headers'] = {'User-Agent': str(user_agent)[:512]}
+    return opts
+
+
 def source_formats(info):
     result=[]; bitrates=set()
     for f in info.get('formats') or []:
@@ -90,9 +105,9 @@ def entry_url(entry):
     return entry.get('webpage_url') or entry.get('original_url') or entry.get('url')
 
 
-def analyze(url):
+def analyze(url, auth=None):
     formats = available_output_formats()
-    opts = base_opts() | {'skip_download': True}
+    opts = apply_youtube_auth(base_opts() | {'skip_download': True}, auth)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
     is_playlist = info.get('_type') == 'playlist' or bool(info.get('entries'))
@@ -147,10 +162,10 @@ def download_opts(output_dir, ext, quality, hook=None):
     }
 
 
-def download_single(url, ext, quality, include_id=False):
+def download_single(url, ext, quality, include_id=False, auth=None):
     temp=tempfile.mkdtemp(prefix='audiodrop-')
     try:
-        opts=download_opts(temp, ext, quality)
+        opts=apply_youtube_auth(download_opts(temp, ext, quality), auth)
         with yt_dlp.YoutubeDL(opts) as ydl:
             info=ydl.extract_info(url, download=True)
         files=[p for p in Path(temp).iterdir() if p.is_file() and p.suffix.lower().lstrip('.') == ext]
@@ -171,8 +186,9 @@ def download_single(url, ext, quality, include_id=False):
 def download_playlist(payload):
     output_dir=Path(payload['outputDir']); output_dir.mkdir(parents=True,exist_ok=True)
     url=payload['url']; ext=payload['format']; quality=int(payload.get('quality') or 192); selected=set(str(x) for x in payload.get('selected') or [])
+    auth=payload.get('youtubeAuth')
     # First resolve playlist entries again through yt-dlp. The URL and selected IDs are validated values from our app.
-    opts=base_opts() | {'skip_download':True,'extract_flat':True}
+    opts=apply_youtube_auth(base_opts() | {'skip_download':True,'extract_flat':True}, auth)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info=ydl.extract_info(url, download=False)
     entries=[e for e in (info.get('entries') or []) if e and str(e.get('id')) in selected]
@@ -184,7 +200,7 @@ def download_playlist(payload):
         u=entry_url(entry)
         if not u: continue
         hook=progress_hook_factory(total, emit)
-        opts=download_opts(str(output_dir), ext, quality, hook)
+        opts=apply_youtube_auth(download_opts(str(output_dir), ext, quality, hook), auth)
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.extract_info(u, download=True)
         done += 1
@@ -204,8 +220,8 @@ def download_playlist(payload):
 def main():
     payload=json.loads(sys.stdin.read())
     action=payload.get('action')
-    if action=='analyze': result=analyze(payload['url']); print(json.dumps(result), flush=True); return
-    if action=='download_single': result=download_single(payload['url'],payload.get('format','mp3'),int(payload.get('quality') or 192),bool(payload.get('includeId'))); print(json.dumps(result), flush=True); return
+    if action=='analyze': result=analyze(payload['url'], payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
+    if action=='download_single': result=download_single(payload['url'],payload.get('format','mp3'),int(payload.get('quality') or 192),bool(payload.get('includeId')), payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
     if action=='download_playlist': download_playlist(payload); return
     raise ValueError('Unknown action.')
 
@@ -214,3 +230,5 @@ try:
 except Exception as exc:
     print(json.dumps({'error': str(exc)}), flush=True)
     raise SystemExit(1)
+
+

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { releaseYouTubeSession } from './youtube-session';
 
 export type Job = { id:string; status:'queued'|'running'|'completed'|'failed'; progress:number; current?:string; completed:number; total:number; error?:string; downloadUrl?:string; filePath?:string };
 const jobs = new Map<string, Job>();
@@ -12,7 +13,14 @@ let active = 0;
 
 export function getJob(id:string) { return jobs.get(id); }
 
-export async function createPlaylistJob(input:{url:string;format:string;quality:number;selected:string[]}) {
+export async function createPlaylistJob(input:{
+  url:string;
+  format:string;
+  quality:number;
+  selected:string[];
+  youtubeSessionId?: string | null;
+  youtubeAuth?: { cookiesPath:string } | null;
+}) {
   const id = randomUUID();
   const job: Job = { id, status:'queued', progress:0, completed:0, total:input.selected.length };
   jobs.set(id, job);
@@ -23,7 +31,14 @@ export async function createPlaylistJob(input:{url:string;format:string;quality:
 
 function publicJob(job:Job) { const {filePath, ...safe} = job; return safe; }
 
-async function run(job:Job, input:{url:string;format:string;quality:number;selected:string[]}) {
+async function run(job:Job, input:{
+  url:string;
+  format:string;
+  quality:number;
+  selected:string[];
+  youtubeSessionId?: string | null;
+  youtubeAuth?: { cookiesPath:string } | null;
+}) {
   const max = Number(process.env.MAX_CONCURRENT_JOBS || 2);
   while (active >= max) await new Promise(r=>setTimeout(r,500));
   active++;
@@ -57,5 +72,12 @@ async function run(job:Job, input:{url:string;format:string;quality:number;selec
       if (current?.filePath) fs.rm(path.dirname(current.filePath), {recursive:true, force:true}).catch(() => undefined);
       jobs.delete(job.id);
     }, 15 * 60 * 1000).unref();
-  } finally { active--; }
+  } finally {
+    active--;
+    if (input.youtubeSessionId) {
+      await releaseYouTubeSession(input.youtubeSessionId);
+    }
+  }
 }
+
+

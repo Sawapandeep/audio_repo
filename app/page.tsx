@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import type { DirectoryHandle } from '@/app/lib/fsTypes';
 import { loadDirectoryHandle, saveDirectoryHandle } from '@/app/lib/directoryStore';
 import {
@@ -56,11 +56,22 @@ function deriveLocalTitle(filename: string) {
   return stripped || filename;
 }
 
-async function downloadBlob(url: string, format: string, quality: number) {
+async function downloadBlob(
+  url: string,
+  format: string,
+  quality: number,
+  youtubeSessionId?: string | null,
+) {
   const res = await fetch('/api/download', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url, format, quality, includeId: true }),
+    body: JSON.stringify({
+      url,
+      format,
+      quality,
+      includeId: true,
+      youtubeSessionId: youtubeSessionId || undefined,
+    }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -127,6 +138,11 @@ export default function Home() {
 
   const [prefsReady, setPrefsReady] = useState(false);
 
+  const [youtubeSessionId, setYoutubeSessionId] = useState<string | null>(null);
+  const [youtubeSessionExpiresAt, setYoutubeSessionExpiresAt] = useState<string | null>(null);
+  const [youtubeSessionBusy, setYoutubeSessionBusy] = useState(false);
+  const youtubeCookieInputRef = useRef<HTMLInputElement | null>(null);
+
   const selectedCount = selected.length;
   const currentFormat = useMemo(() => analysis?.outputFormats.find(x => x.ext === format), [analysis, format]);
   const reviewCurrentFormat = useMemo(
@@ -156,11 +172,51 @@ export default function Home() {
     savePreferences({ format, quality });
   }, [format, quality, prefsReady]);
 
+  async function connectYouTubeFromFile(file: File) {
+    setYoutubeSessionBusy(true);
+    setError('');
+    setSyncError('');
+    try {
+      const form = new FormData();
+      form.set('cookies', file);
+      const res = await fetch('/api/youtube/session', { method: 'POST', body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Unable to create the temporary YouTube session.');
+      setYoutubeSessionId(data.sessionId);
+      setYoutubeSessionExpiresAt(data.expiresAt);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to connect YouTube.';
+      setError(message);
+    } finally {
+      setYoutubeSessionBusy(false);
+      if (youtubeCookieInputRef.current) youtubeCookieInputRef.current.value = '';
+    }
+  }
+
+  async function disconnectYouTube() {
+    const id = youtubeSessionId;
+    setYoutubeSessionId(null);
+    setYoutubeSessionExpiresAt(null);
+    if (!id) return;
+    try {
+      await fetch(`/api/youtube/session?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch {
+      // The server-side TTL is the safety net if the release request is interrupted.
+    }
+  }
+
+  function youtubeSessionLabel() {
+    if (!youtubeSessionExpiresAt) return '';
+    const remaining = Math.max(0, new Date(youtubeSessionExpiresAt).getTime() - Date.now());
+    const minutes = Math.ceil(remaining / 60000);
+    return minutes <= 1 ? 'expires in about 1 minute' : `expires in about ${minutes} minutes`;
+  }
+
   async function analyze(e?: FormEvent) {
     e?.preventDefault();
     setLoading(true); setError(''); setAnalysis(null); setJob(null);
     try {
-      const res = await fetch('/api/analyze', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ url }) });
+      const res = await fetch('/api/analyze', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ url, youtubeSessionId: youtubeSessionId || undefined }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to analyze this URL.');
       setAnalysis(data);
@@ -175,10 +231,14 @@ export default function Home() {
     if (!analysis) return;
     setLoading(true); setError('');
     try {
-      const { blob, name } = await downloadBlob(analysis.url, format, quality);
+      const { blob, name } = await downloadBlob(analysis.url, format, quality, youtubeSessionId);
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    } catch (err) { setError(err instanceof Error ? err.message : 'Download failed.'); }
+      if (youtubeSessionId) await disconnectYouTube();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Download failed.');
+      if (youtubeSessionId) await disconnectYouTube();
+    }
     finally { setLoading(false); }
   }
 
@@ -186,7 +246,13 @@ export default function Home() {
     if (!analysis || !analysis.tracks?.length || !selectedCount) return;
     setLoading(true); setError(''); setJob(null);
     try {
-      const res = await fetch('/api/jobs', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ url:analysis.url, format, quality, selected }) });
+      const res = await fetch('/api/jobs', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({
+          url: analysis.url,
+          format,
+          quality,
+          selected,
+          youtubeSessionId: youtubeSessionId || undefined,
+        }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to start playlist download.');
       setJob(data);
@@ -200,9 +266,13 @@ export default function Home() {
       const res = await fetch(`/api/jobs/${job.id}`, { cache:'no-store' });
       const data = await res.json();
       setJob(data);
+      if ((data.status === 'completed' || data.status === 'failed') && youtubeSessionId) {
+        setYoutubeSessionId(null);
+        setYoutubeSessionExpiresAt(null);
+      }
     }, 800);
     return () => clearInterval(timer);
-  }, [job]);
+  }, [job, youtubeSessionId]);
 
   function toggleTrack(id: string) {
     setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
@@ -219,7 +289,11 @@ export default function Home() {
       const res = await fetch('/api/sync', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ url: playlistUrl.trim(), existingIds: [...localFiles.keys()] }),
+        body: JSON.stringify({
+            url: playlistUrl.trim(),
+            existingIds: [...localFiles.keys()],
+            youtubeSessionId: youtubeSessionId || undefined,
+          }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to sync playlist.');
@@ -313,7 +387,12 @@ export default function Home() {
       for (let i = 0; i < toDownload.length; i++) {
         const track = toDownload[i];
         setReviewProgress({ done: i, total: toDownload.length, current: track.title });
-        const { blob, name } = await downloadBlob(track.url, format, quality);
+        const { blob, name } = await downloadBlob(
+          track.url,
+          format,
+          quality,
+          youtubeSessionId,
+        );
         await saveToDirectory(directory, name, blob);
         setReviewProgress({ done: i + 1, total: toDownload.length, current: track.title });
       }
@@ -326,8 +405,10 @@ export default function Home() {
       setSyncHistory(loadSyncHistory());
       setReviewOpen(false);
       setReviewData(null);
+      if (youtubeSessionId) await disconnectYouTube();
     } catch (err) {
       setSyncError(err instanceof Error ? err.message : 'Sync download failed.');
+      if (youtubeSessionId) await disconnectYouTube();
     } finally {
       setDownloadingReview(false);
     }
@@ -357,6 +438,58 @@ export default function Home() {
         <div className="inputRow"><input className="urlInput" value={url} onChange={e=>setUrl(e.target.value)} placeholder="Paste a YouTube / YouTube Music URL" inputMode="url" autoCapitalize="none" autoCorrect="off" /><button className="primary" disabled={loading || !url.trim()}>{loading ? <><span className="spinner"/>Working</> : 'Analyze'}</button></div>
         {error && <div className="error">{error}</div>}
       </form>
+
+      <section className="card section youtubeAccessCard">
+        <div className="syncHeader">
+          <div>
+            <div className="syncTitle">Temporary YouTube access</div>
+            <div className="syncSub">
+              Needed for private playlists, age-restricted content, or YouTube sessions that require verification.
+              AudioDrop never asks for your Google password.
+            </div>
+          </div>
+          <span className="badge">{youtubeSessionId ? 'Connected' : 'Not connected'}</span>
+        </div>
+
+        {youtubeSessionId ? (
+          <div className="youtubeConnected">
+            <div>
+              <strong>● YouTube access active</strong>
+              <div className="syncNote">{youtubeSessionLabel()}. It is deleted when the task finishes or when you disconnect.</div>
+            </div>
+            <button type="button" className="secondary" onClick={disconnectYouTube} disabled={youtubeSessionBusy || loading || syncing || downloadingReview}>
+              Disconnect
+            </button>
+          </div>
+        ) : (
+          <>
+            <input
+              ref={youtubeCookieInputRef}
+              type="file"
+              accept=".txt,text/plain"
+              hidden
+              onChange={e => {
+                const file = e.target.files?.[0];
+                if (file) void connectYouTubeFromFile(file);
+              }}
+            />
+            <div className="syncActions">
+              <button
+                type="button"
+                className="primary"
+                onClick={() => youtubeCookieInputRef.current?.click()}
+                disabled={youtubeSessionBusy}
+              >
+                {youtubeSessionBusy ? 'Connecting…' : 'Connect YouTube temporarily'}
+              </button>
+            </div>
+            <div className="syncNote">
+              Export a fresh YouTube <code>cookies.txt</code> file in Mozilla/Netscape format from your own browser session, then select it here.
+              The file is stored only on the server for the temporary session and is automatically deleted after the task or the safety timeout.
+            </div>
+          </>
+        )}
+      </section>
 
       {analysis && <section className="card section">
         <div className="meta">
@@ -521,7 +654,7 @@ export default function Home() {
         </div>
       )}
 
-      <footer className="footer">Phase 1 · Audio only · No accounts, database or cloud storage · Playlist sync + Sync Review added</footer>
+      <footer className="footer">Phase 1 · Audio only · Temporary YouTube access · Playlist sync + Sync Review</footer>
     </main>
   );
 }
@@ -1050,3 +1183,4 @@ export default function Home() {
 //     </main>
 //   );
 // }
+

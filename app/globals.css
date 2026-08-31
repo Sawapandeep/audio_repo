@@ -96,3 +96,26 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .syncHeader { flex-direction:column; }
   .syncActions { flex-direction:column; }
 }
+
+
+
+.youtubeAccessCard { margin-top:16px; }
+.youtubeConnected {
+  margin-top:14px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:12px;
+  border:1px solid rgba(98,230,167,.22);
+  background:rgba(98,230,167,.05);
+  border-radius:14px;
+}
+.youtubeConnected strong { color:var(--success); font-size:13px; }
+.youtubeAccessCard code {
+  font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color:var(--text);
+}
+@media (max-width:560px) {
+  .youtubeConnected { align-items:stretch; flex-direction:column; }
+}
