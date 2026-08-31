@@ -4,6 +4,12 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { releaseYouTubeSession } from './youtube-session';
 
+export type JobTrack = {
+  id: string;
+  title: string;
+  url: string;
+};
+
 export type Job = { id:string; status:'queued'|'running'|'completed'|'failed'; progress:number; current?:string; completed:number; total:number; error?:string; downloadUrl?:string; filePath?:string };
 const jobs = new Map<string, Job>();
 const root = process.cwd();
@@ -18,11 +24,11 @@ export async function createPlaylistJob(input:{
   format:string;
   quality:number;
   selected:string[];
+  tracks: JobTrack[];
   youtubeSessionId?: string | null;
-  youtubeAuth?: { cookiesPath:string } | null;
 }) {
   const id = randomUUID();
-  const job: Job = { id, status:'queued', progress:0, completed:0, total:input.selected.length };
+  const job: Job = { id, status:'queued', progress:0, completed:0, total:input.tracks.length };
   jobs.set(id, job);
   await fs.mkdir(tempRoot, {recursive:true});
   run(job, input).catch(err => { job.status='failed'; job.error=err instanceof Error ? err.message : 'Job failed.'; });
@@ -36,8 +42,8 @@ async function run(job:Job, input:{
   format:string;
   quality:number;
   selected:string[];
+  tracks: JobTrack[];
   youtubeSessionId?: string | null;
-  youtubeAuth?: { cookiesPath:string } | null;
 }) {
   const max = Number(process.env.MAX_CONCURRENT_JOBS || 2);
   while (active >= max) await new Promise(r=>setTimeout(r,500));
@@ -63,7 +69,15 @@ async function run(job:Job, input:{
         } catch { last=line; }
       }
     });
-    child.stdin.end(JSON.stringify({...input, action:'download_playlist', outputDir:dir, jobId:job.id}));
+    child.stdin.end(JSON.stringify({
+      action:'download_playlist',
+      outputDir:dir,
+      jobId:job.id,
+      url:input.url,
+      format:input.format,
+      quality:input.quality,
+      tracks:input.tracks,
+    }));
     await new Promise<void>((resolve,reject)=>child.on('close', code=>code===0?resolve():reject(new Error(stderr.trim() || last || 'Playlist download failed.'))));
     if (!job.filePath) throw new Error('Playlist finished without an output file.');
     job.completed=job.total; job.progress=100; job.status='completed'; job.downloadUrl=`/api/jobs/${job.id}/download`;
@@ -79,5 +93,3 @@ async function run(job:Job, input:{
     }
   }
 }
-
-

@@ -1,44 +1,35 @@
-# Sync Review + SpeedSync + Preferences — file drop-in guide
+# AudioDrop — Google OAuth + ytmusicapi change
 
-These files replace/add to your EXISTING working AudioDrop repo (the one
-with Sync already working via the browser confirm() popup). Nothing else
-in your repo needs to change — no new dependencies, no backend/Python
-changes beyond the one route below.
+This change replaces the manual `cookies.txt` upload flow for playlist access with Google's TV/Limited-Input OAuth flow, which is the OAuth flow documented by ytmusicapi.
 
-## New files (add these)
-- lib/fsTypes.ts           — shared File System Access API types
-- lib/directoryStore.ts    — IndexedDB persistence for the selected folder handle
-- lib/preferences.ts       — cookie persistence for format/quality + last-5 playlist history
+## Runtime flow
 
-## Replaced files (overwrite these)
-- app/page.tsx             — adds the Sync Review modal, SpeedSync section,
-                              folder-handle restore on load, and preference
-                              persistence. Normal single/playlist download
-                              flow is unchanged.
-- app/globals.css           — added styles for the modal, review list, and
-                              SpeedSync cards; nothing else was touched.
-- app/api/sync/route.ts     — now returns the FULL track list (each tagged
-                              existing/missing) plus outputFormats, instead
-                              of just a missing[] array + count. This is
-                              required for the three-way Review screen.
+1. Click **Connect YouTube with Google**.
+2. AudioDrop requests a Google device code.
+3. The user opens Google's verification page and enters the one-time code.
+4. Google shows the AudioDrop consent screen; the user clicks **Allow**.
+5. AudioDrop polls Google and receives the access/refresh token.
+6. `ytmusicapi.YTMusic(...).get_playlist()` resolves the authenticated playlist.
+7. AudioDrop sends the resulting video URLs to yt-dlp for the actual MP3/M4A download.
+8. The OAuth session is held in memory for the configured TTL (default 15 minutes) and revoked on disconnect/expiry/job completion.
 
-## What changed in the sync UX
-- "Sync now" / "SpeedSync" no longer trigger window.confirm() — they open
-  a bottom-sheet "Sync Review" modal showing:
-  - Already in folder / New-missing / Local-only counts
-  - A per-track list (missing tracks are checkboxed, pre-selected)
-  - Shared format/quality selectors (same as normal downloads)
-  - "Download N New Songs" to confirm
-- SpeedSync cards appear once you've completed at least one sync — they
-  remember the last 5 playlists (cookie) and re-run analyze+scan on click,
-  but ALWAYS show the Review screen first — never auto-downloads.
-- The selected folder handle is now persisted in IndexedDB, so returning
-  visitors don't have to re-pick it (subject to the browser still honoring
-  the permission — a "Reconnect folder" button appears if it needs re-
-  confirming, which requires a click since permission prompts need a user
-  gesture).
+## Google Cloud setup
 
-## Verified
-Type-checked with `tsc --noEmit` against this exact file set (page.tsx,
-the new lib files, the updated sync route, and your existing unchanged
-server/*.py + server/*.ts + other API routes) — no type errors.
+1. Create/select a Google Cloud project.
+2. Enable **YouTube Data API v3**.
+3. Configure the OAuth consent screen / Google Auth Platform branding. Set the application name to `AudioDrop` if that is what you want Google to display.
+4. Add your own Google account as a test user while the app is in Testing mode.
+5. Create an OAuth client with application type **TVs and Limited Input devices**. This is the client type required by the ytmusicapi OAuth setup.
+6. Put the client ID and client secret into the server environment variables below.
+
+```text
+GOOGLE_YOUTUBE_CLIENT_ID=...
+GOOGLE_YOUTUBE_CLIENT_SECRET=...
+YOUTUBE_OAUTH_SESSION_TTL_SECONDS=900
+```
+
+No redirect URI is needed for this device-code flow.
+
+## Important limitation
+
+Google OAuth solves the authenticated **playlist metadata** side. It does not turn the OAuth token into a browser cookie for yt-dlp. Therefore, the implementation deliberately uses OAuth/ytmusicapi for playlist resolution and yt-dlp for the media URL download. If an individual selected video is itself private or yt-dlp requires a browser session/PO token for that media request, that individual download can still fail.

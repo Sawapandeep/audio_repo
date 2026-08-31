@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import type { DirectoryHandle } from '@/app/lib/fsTypes';
 import { loadDirectoryHandle, saveDirectoryHandle } from '@/app/lib/directoryStore';
 import {
@@ -141,7 +141,7 @@ export default function Home() {
   const [youtubeSessionId, setYoutubeSessionId] = useState<string | null>(null);
   const [youtubeSessionExpiresAt, setYoutubeSessionExpiresAt] = useState<string | null>(null);
   const [youtubeSessionBusy, setYoutubeSessionBusy] = useState(false);
-  const youtubeCookieInputRef = useRef<HTMLInputElement | null>(null);
+  const [youtubeOAuthInfo, setYoutubeOAuthInfo] = useState<{ verificationUrl: string; userCode: string } | null>(null);
 
   const selectedCount = selected.length;
   const currentFormat = useMemo(() => analysis?.outputFormats.find(x => x.ext === format), [analysis, format]);
@@ -172,24 +172,56 @@ export default function Home() {
     savePreferences({ format, quality });
   }, [format, quality, prefsReady]);
 
-  async function connectYouTubeFromFile(file: File) {
+  async function connectYouTubeWithGoogle() {
     setYoutubeSessionBusy(true);
     setError('');
     setSyncError('');
+    setYoutubeOAuthInfo(null);
+
     try {
-      const form = new FormData();
-      form.set('cookies', file);
-      const res = await fetch('/api/youtube/session', { method: 'POST', body: form });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Unable to create the temporary YouTube session.');
-      setYoutubeSessionId(data.sessionId);
-      setYoutubeSessionExpiresAt(data.expiresAt);
+      const startRes = await fetch('/api/youtube/oauth/start', { method: 'POST', cache: 'no-store' });
+      const startData = await startRes.json().catch(() => ({}));
+      if (!startRes.ok) throw new Error(startData.error || 'Unable to start Google YouTube authorization.');
+
+      const deviceCode = String(startData.deviceCode || '');
+      const verificationUrl = String(startData.verificationUrl || '');
+      const userCode = String(startData.userCode || '');
+      const expiresIn = Math.max(60, Number(startData.expiresIn || 1800));
+      const interval = Math.max(5, Number(startData.interval || 5));
+      if (!deviceCode || !verificationUrl || !userCode) throw new Error('Google did not return a valid device authorization request.');
+
+      setYoutubeOAuthInfo({ verificationUrl, userCode });
+      try { window.open(verificationUrl, '_blank', 'noopener,noreferrer'); } catch { /* The visible link remains available below. */ }
+
+      const deadline = Date.now() + expiresIn * 1000;
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, interval * 1000));
+        const pollRes = await fetch('/api/youtube/oauth/poll', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ deviceCode }),
+          cache: 'no-store',
+        });
+        const pollData = await pollRes.json().catch(() => ({}));
+
+        if (pollData.status === 'authorized') {
+          setYoutubeSessionId(pollData.sessionId);
+          setYoutubeSessionExpiresAt(pollData.expiresAt);
+          setYoutubeOAuthInfo(null);
+          return;
+        }
+        if (!pollRes.ok || pollData.status === 'error') {
+          throw new Error(pollData.error || 'Google authorization failed.');
+        }
+      }
+
+      throw new Error('The Google authorization request expired. Connect YouTube again.');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to connect YouTube.';
+      const message = err instanceof Error ? err.message : 'Unable to connect YouTube with Google.';
       setError(message);
+      setYoutubeOAuthInfo(null);
     } finally {
       setYoutubeSessionBusy(false);
-      if (youtubeCookieInputRef.current) youtubeCookieInputRef.current.value = '';
     }
   }
 
@@ -197,6 +229,7 @@ export default function Home() {
     const id = youtubeSessionId;
     setYoutubeSessionId(null);
     setYoutubeSessionExpiresAt(null);
+    setYoutubeOAuthInfo(null);
     if (!id) return;
     try {
       await fetch(`/api/youtube/session?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
@@ -251,6 +284,7 @@ export default function Home() {
           format,
           quality,
           selected,
+          tracks: analysis.tracks.filter(track => selected.includes(track.id)),
           youtubeSessionId: youtubeSessionId || undefined,
         }) });
       const data = await res.json();
@@ -444,18 +478,18 @@ export default function Home() {
           <div>
             <div className="syncTitle">Temporary YouTube access</div>
             <div className="syncSub">
-              Needed for private playlists, age-restricted content, or YouTube sessions that require verification.
+              Sign in with Google when AudioDrop needs access to a private YouTube / YouTube Music playlist.
               AudioDrop never asks for your Google password.
             </div>
           </div>
-          <span className="badge">{youtubeSessionId ? 'Connected' : 'Not connected'}</span>
+          <span className="badge">{youtubeSessionId ? 'Connected' : youtubeOAuthInfo ? 'Waiting for Google' : 'Not connected'}</span>
         </div>
 
         {youtubeSessionId ? (
           <div className="youtubeConnected">
             <div>
               <strong>● YouTube access active</strong>
-              <div className="syncNote">{youtubeSessionLabel()}. It is deleted when the task finishes or when you disconnect.</div>
+              <div className="syncNote">{youtubeSessionLabel()}. The temporary authorization is revoked when you disconnect or the safety timeout expires.</div>
             </div>
             <button type="button" className="secondary" onClick={disconnectYouTube} disabled={youtubeSessionBusy || loading || syncing || downloadingReview}>
               Disconnect
@@ -463,29 +497,29 @@ export default function Home() {
           </div>
         ) : (
           <>
-            <input
-              ref={youtubeCookieInputRef}
-              type="file"
-              accept=".txt,text/plain"
-              hidden
-              onChange={e => {
-                const file = e.target.files?.[0];
-                if (file) void connectYouTubeFromFile(file);
-              }}
-            />
             <div className="syncActions">
               <button
                 type="button"
                 className="primary"
-                onClick={() => youtubeCookieInputRef.current?.click()}
+                onClick={() => void connectYouTubeWithGoogle()}
                 disabled={youtubeSessionBusy}
               >
-                {youtubeSessionBusy ? 'Connecting…' : 'Connect YouTube temporarily'}
+                {youtubeSessionBusy ? 'Waiting for Google…' : 'Connect YouTube with Google'}
               </button>
             </div>
+
+            {youtubeOAuthInfo && (
+              <div className="notice">
+                <strong>Finish the Google sign-in</strong>
+                <div style={{ marginTop: 8 }}>Open Google, enter this one-time code, then press <strong>Allow</strong>:</div>
+                <div style={{ fontSize: 24, fontWeight: 900, letterSpacing: '.08em', margin: '10px 0' }}>{youtubeOAuthInfo.userCode}</div>
+                <a className="secondary" href={youtubeOAuthInfo.verificationUrl} target="_blank" rel="noreferrer">Open Google authorization</a>
+                <div className="syncNote">This page will automatically detect the approval. Do not share the code with anyone.</div>
+              </div>
+            )}
+
             <div className="syncNote">
-              Export a fresh YouTube <code>cookies.txt</code> file in Mozilla/Netscape format from your own browser session, then select it here.
-              The file is stored only on the server for the temporary session and is automatically deleted after the task or the safety timeout.
+              Google OAuth is used only to obtain temporary YouTube access for playlist metadata. The Google password is entered only on Google&apos;s website and is never sent to AudioDrop.
             </div>
           </>
         )}
@@ -1183,4 +1217,6 @@ export default function Home() {
 //     </main>
 //   );
 // }
+
+
 

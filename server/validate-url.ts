@@ -1,4 +1,3 @@
-
 const allowedHosts = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be']);
 
 export function validateSourceUrl(input: unknown): string {
@@ -12,4 +11,9 @@ export function validateSourceUrl(input: unknown): string {
     throw new Error('Unsupported YouTube URL type.');
   }
   return url.toString();
+}
+
+export function isYouTubePlaylistUrl(input: string): boolean {
+  const url = new URL(input);
+  return url.searchParams.has('list') && (url.pathname.startsWith('/playlist') || url.pathname.startsWith('/music/playlist'));
 }

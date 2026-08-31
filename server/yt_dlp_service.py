@@ -12,6 +12,7 @@ from pathlib import Path
 
 try:
     import yt_dlp
+    from ytmusicapi import OAuthCredentials, YTMusic
 except Exception as exc:
     print(json.dumps({'error': f'yt-dlp is not installed or could not be imported: {exc}'}))
     raise SystemExit(1)
@@ -134,6 +135,75 @@ def analyze(url, auth=None):
     }
 
 
+def extract_playlist_id(url):
+    from urllib.parse import parse_qs, urlparse
+    parsed = urlparse(url)
+    playlist_id = parse_qs(parsed.query).get('list', [None])[0]
+    if not playlist_id:
+        raise ValueError('The YouTube Music playlist URL is missing its playlist id.')
+    return str(playlist_id)
+
+
+def ytmusic_playlist(url, auth):
+    if not auth:
+        raise RuntimeError('Google YouTube authorization is required for YouTube Music playlist access.')
+
+    client_id = os.environ.get('GOOGLE_YOUTUBE_CLIENT_ID')
+    client_secret = os.environ.get('GOOGLE_YOUTUBE_CLIENT_SECRET')
+    if not client_id or not client_secret:
+        raise RuntimeError('Google YouTube OAuth client credentials are not configured on the server.')
+
+    playlist_id = extract_playlist_id(url)
+    token = {
+        'access_token': str(auth.get('accessToken') or ''),
+        'refresh_token': str(auth.get('refreshToken') or ''),
+        'expires_at': int(auth.get('expiresAt') or 0),
+        'expires_in': max(0, int((int(auth.get('expiresAt') or 0)) - __import__('time').time())),
+        'scope': str(auth.get('scope') or 'https://www.googleapis.com/auth/youtube'),
+        'token_type': str(auth.get('tokenType') or 'Bearer'),
+    }
+    if not token['access_token'] or not token['refresh_token']:
+        raise RuntimeError('The Google YouTube OAuth token is incomplete. Connect YouTube again.')
+
+    ytmusic = YTMusic(
+        token,
+        oauth_credentials=OAuthCredentials(client_id=client_id, client_secret=client_secret),
+    )
+    playlist = ytmusic.get_playlist(playlist_id, limit=None)
+    formats = available_output_formats()
+
+    tracks = []
+    for idx, track in enumerate(playlist.get('tracks') or [], start=1):
+        if not track or not track.get('videoId'):
+            continue
+        artists = track.get('artists') or []
+        uploader = ', '.join(str(a.get('name')) for a in artists if isinstance(a, dict) and a.get('name')) or None
+        thumbnails = track.get('thumbnails') or []
+        thumbnail = thumbnails[-1].get('url') if thumbnails and isinstance(thumbnails[-1], dict) else None
+        tracks.append({
+            'id': str(track['videoId']),
+            'title': track.get('title') or f'Track {idx}',
+            'uploader': uploader,
+            'duration': track.get('duration_seconds'),
+            'url': f"https://www.youtube.com/watch?v={track['videoId']}",
+            'index': idx,
+            'thumbnail': thumbnail,
+        })
+
+    return {
+        'type': 'playlist',
+        'title': playlist.get('title') or 'YouTube Music Playlist',
+        'thumbnail': None,
+        'uploader': None,
+        'duration': None,
+        'url': url,
+        'formats': [],
+        'sourceBitrates': [],
+        'outputFormats': formats,
+        'tracks': tracks,
+    }
+
+
 def progress_hook_factory(total, emit):
     completed=0; current=''
     def hook(d):
@@ -185,13 +255,20 @@ def download_single(url, ext, quality, include_id=False, auth=None):
 
 def download_playlist(payload):
     output_dir=Path(payload['outputDir']); output_dir.mkdir(parents=True,exist_ok=True)
-    url=payload['url']; ext=payload['format']; quality=int(payload.get('quality') or 192); selected=set(str(x) for x in payload.get('selected') or [])
-    auth=payload.get('youtubeAuth')
-    # First resolve playlist entries again through yt-dlp. The URL and selected IDs are validated values from our app.
-    opts=apply_youtube_auth(base_opts() | {'skip_download':True,'extract_flat':True}, auth)
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info=ydl.extract_info(url, download=False)
-    entries=[e for e in (info.get('entries') or []) if e and str(e.get('id')) in selected]
+    ext=payload['format']; quality=int(payload.get('quality') or 192)
+    tracks=payload.get('tracks') or []
+    entries=[]
+    for track in tracks:
+        if not isinstance(track, dict):
+            continue
+        u=track.get('url')
+        if not u:
+            continue
+        entries.append({
+            'id': str(track.get('id') or ''),
+            'title': track.get('title') or 'Track',
+            'webpage_url': u,
+        })
     if not entries: raise RuntimeError('None of the selected playlist tracks could be resolved.')
     done=0; total=len(entries)
     def emit(msg):
@@ -220,6 +297,7 @@ def download_playlist(payload):
 def main():
     payload=json.loads(sys.stdin.read())
     action=payload.get('action')
+    if action=='ytmusic_playlist': result=ytmusic_playlist(payload['url'], payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
     if action=='analyze': result=analyze(payload['url'], payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
     if action=='download_single': result=download_single(payload['url'],payload.get('format','mp3'),int(payload.get('quality') or 192),bool(payload.get('includeId')), payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
     if action=='download_playlist': download_playlist(payload); return
@@ -230,5 +308,7 @@ try:
 except Exception as exc:
     print(json.dumps({'error': str(exc)}), flush=True)
     raise SystemExit(1)
+
+
 
 
