@@ -142,7 +142,16 @@ export default function Home() {
   const [youtubeSessionExpiresAt, setYoutubeSessionExpiresAt] = useState<string | null>(null);
   const [youtubeSessionBusy, setYoutubeSessionBusy] = useState(false);
   const [youtubeOAuthInfo, setYoutubeOAuthInfo] = useState<{ verificationUrl: string; userCode: string } | null>(null);
-
+  const [codeCopied, setCodeCopied] = useState(false); // NEW
+  async function copyOAuthCode(code: string) {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 2000);
+    } catch {
+      // Clipboard API can fail on non-HTTPS or unsupported browsers; the code is still visible to copy manually.
+    }
+  }
   const selectedCount = selected.length;
   const currentFormat = useMemo(() => analysis?.outputFormats.find(x => x.ext === format), [analysis, format]);
   const reviewCurrentFormat = useMemo(
@@ -177,6 +186,7 @@ export default function Home() {
     setError('');
     setSyncError('');
     setYoutubeOAuthInfo(null);
+    setCodeCopied(false);
 
     try {
       const startRes = await fetch('/api/youtube/oauth/start', { method: 'POST', cache: 'no-store' });
@@ -504,11 +514,11 @@ export default function Home() {
                 onClick={() => void connectYouTubeWithGoogle()}
                 disabled={youtubeSessionBusy}
               >
-                {youtubeSessionBusy ? 'Waiting for Google…' : 'Connect YouTube with Google'}
+                {youtubeSessionBusy ? 'Waiting for Google…' : 'Connect Audio_drop with Google'}
               </button>
             </div>
 
-            {youtubeOAuthInfo && (
+            {/* {youtubeOAuthInfo && (
               <div className="notice">
                 <strong>Finish the Google sign-in</strong>
                 <div style={{ marginTop: 8 }}>Open Google, enter this one-time code, then press <strong>Allow</strong>:</div>
@@ -516,7 +526,51 @@ export default function Home() {
                 <a className="secondary" href={youtubeOAuthInfo.verificationUrl} target="_blank" rel="noreferrer">Open Google authorization</a>
                 <div className="syncNote">This page will automatically detect the approval. Do not share the code with anyone.</div>
               </div>
-            )}
+            )} */}
+            {youtubeOAuthInfo && (
+  <div className="notice">
+    <strong>Finish the Google sign-in</strong>
+    <div style={{ marginTop: 8 }}>
+      A Google tab should have opened automatically. Tap the code to copy it, paste it there, then press <strong>Allow</strong>:
+    </div>
+
+    <button
+      type="button"
+      onClick={() => copyOAuthCode(youtubeOAuthInfo.userCode)}
+      style={{
+        display: 'block',
+        width: '100%',
+        margin: '10px 0',
+        padding: '14px 12px',
+        fontSize: 26,
+        fontWeight: 900,
+        letterSpacing: '.08em',
+        textAlign: 'center',
+        fontFamily: 'monospace',
+        background: codeCopied ? '#e6f7ec' : '#f4f4f5',
+        border: '2px dashed #999',
+        borderRadius: 10,
+        cursor: 'pointer',
+      }}
+    >
+      {youtubeOAuthInfo.userCode}
+    </button>
+    <div style={{ fontSize: 13, marginTop: -4, marginBottom: 10, textAlign: 'center' }}>
+      {codeCopied ? '✓ Copied — paste it into the Google tab' : 'Tap to copy'}
+    </div>
+
+    <a
+      className="secondary"
+      href={youtubeOAuthInfo.verificationUrl}
+      target="_blank"
+      rel="noreferrer"
+    >
+      Didn&apos;t open? Open Google authorization
+    </a>
+
+    <div className="syncNote">This page will automatically detect the approval. Do not share the code with anyone.</div>
+  </div>
+)}
 
             <div className="syncNote">
               Google OAuth is used only to obtain temporary YouTube access for playlist metadata. The Google password is entered only on Google&apos;s website and is never sent to AudioDrop.
