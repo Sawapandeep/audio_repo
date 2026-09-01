@@ -143,65 +143,150 @@ def extract_playlist_id(url):
         raise ValueError('The YouTube Music playlist URL is missing its playlist id.')
     return str(playlist_id)
 
+#----
+import json as _json
+from urllib import request as _urlreq, parse as _urlparse, error as _urlerror
 
-def ytmusic_playlist(url, auth):
+YOUTUBE_API_BASE = 'https://www.googleapis.com/youtube/v3'
+
+
+def _youtube_api_get(path, params, access_token):
+    query = _urlparse.urlencode(params)
+    req = _urlreq.Request(f'{YOUTUBE_API_BASE}/{path}?{query}', headers={
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/json',
+    })
+    try:
+        with _urlreq.urlopen(req, timeout=15) as resp:
+            return _json.loads(resp.read().decode('utf-8'))
+    except _urlerror.HTTPError as exc:
+        body = exc.read().decode('utf-8', 'ignore')
+        try:
+            message = _json.loads(body).get('error', {}).get('message') or body
+        except Exception:
+            message = body
+        if exc.code == 401:
+            raise RuntimeError('The Google YouTube authorization expired or was revoked. Connect YouTube again.') from exc
+        if exc.code == 403:
+            raise RuntimeError(f'YouTube API access denied: {message}') from exc
+        if exc.code == 404:
+            raise RuntimeError('That playlist was not found, or is not accessible with this Google account.') from exc
+        raise RuntimeError(f'YouTube API error ({exc.code}): {message}') from exc
+
+
+def youtube_playlist(url, auth):
     if not auth:
-        raise RuntimeError('Google YouTube authorization is required for YouTube Music playlist access.')
-
-    client_id = os.environ.get('GOOGLE_YOUTUBE_CLIENT_ID')
-    client_secret = os.environ.get('GOOGLE_YOUTUBE_CLIENT_SECRET')
-    if not client_id or not client_secret:
-        raise RuntimeError('Google YouTube OAuth client credentials are not configured on the server.')
-
-    playlist_id = extract_playlist_id(url)
-    token = {
-        'access_token': str(auth.get('accessToken') or ''),
-        'refresh_token': str(auth.get('refreshToken') or ''),
-        'expires_at': int(auth.get('expiresAt') or 0),
-        'expires_in': max(0, int((int(auth.get('expiresAt') or 0)) - __import__('time').time())),
-        'scope': str(auth.get('scope') or 'https://www.googleapis.com/auth/youtube'),
-        'token_type': str(auth.get('tokenType') or 'Bearer'),
-    }
-    if not token['access_token'] or not token['refresh_token']:
+        raise RuntimeError('Google YouTube authorization is required for private playlist access.')
+    access_token = str(auth.get('accessToken') or '')
+    if not access_token:
         raise RuntimeError('The Google YouTube OAuth token is incomplete. Connect YouTube again.')
 
-    ytmusic = YTMusic(
-        token,
-        oauth_credentials=OAuthCredentials(client_id=client_id, client_secret=client_secret),
-    )
-    playlist = ytmusic.get_playlist(playlist_id, limit=None)
+    playlist_id = extract_playlist_id(url)
     formats = available_output_formats()
 
+    meta = _youtube_api_get('playlists', {'part': 'snippet', 'id': playlist_id}, access_token)
+    items_meta = meta.get('items') or []
+    playlist_title = (items_meta[0]['snippet']['title'] if items_meta and items_meta[0].get('snippet') else 'Playlist')
+    playlist_thumb = None
+    if items_meta and items_meta[0].get('snippet', {}).get('thumbnails'):
+        thumbs = items_meta[0]['snippet']['thumbnails']
+        playlist_thumb = (thumbs.get('medium') or thumbs.get('default') or {}).get('url')
+
     tracks = []
-    for idx, track in enumerate(playlist.get('tracks') or [], start=1):
-        if not track or not track.get('videoId'):
-            continue
-        artists = track.get('artists') or []
-        uploader = ', '.join(str(a.get('name')) for a in artists if isinstance(a, dict) and a.get('name')) or None
-        thumbnails = track.get('thumbnails') or []
-        thumbnail = thumbnails[-1].get('url') if thumbnails and isinstance(thumbnails[-1], dict) else None
-        tracks.append({
-            'id': str(track['videoId']),
-            'title': track.get('title') or f'Track {idx}',
-            'uploader': uploader,
-            'duration': track.get('duration_seconds'),
-            'url': f"https://www.youtube.com/watch?v={track['videoId']}",
-            'index': idx,
-            'thumbnail': thumbnail,
-        })
+    page_token = None
+    idx = 0
+    while True:
+        params = {'part': 'snippet,contentDetails', 'playlistId': playlist_id, 'maxResults': 50}
+        if page_token:
+            params['pageToken'] = page_token
+        page = _youtube_api_get('playlistItems', params, access_token)
+        for item in page.get('items') or []:
+            snippet = item.get('snippet') or {}
+            content = item.get('contentDetails') or {}
+            video_id = content.get('videoId') or (snippet.get('resourceId') or {}).get('videoId')
+            if not video_id or snippet.get('title') in ('Deleted video', 'Private video'):
+                continue
+            idx += 1
+            thumbs = snippet.get('thumbnails') or {}
+            thumb = (thumbs.get('medium') or thumbs.get('default') or {}).get('url') if thumbs else None
+            tracks.append({
+                'id': str(video_id),
+                'title': snippet.get('title') or f'Track {idx}',
+                'uploader': snippet.get('videoOwnerChannelTitle') or snippet.get('channelTitle'),
+                'duration': None,
+                'url': f'https://www.youtube.com/watch?v={video_id}',
+                'index': idx,
+                'thumbnail': thumb,
+            })
+        page_token = page.get('nextPageToken')
+        if not page_token:
+            break
 
     return {
-        'type': 'playlist',
-        'title': playlist.get('title') or 'YouTube Music Playlist',
-        'thumbnail': None,
-        'uploader': None,
-        'duration': None,
-        'url': url,
-        'formats': [],
-        'sourceBitrates': [],
-        'outputFormats': formats,
-        'tracks': tracks,
+        'type': 'playlist', 'title': playlist_title, 'thumbnail': playlist_thumb,
+        'uploader': None, 'duration': None, 'url': url,
+        'formats': [], 'sourceBitrates': [], 'outputFormats': formats, 'tracks': tracks,
     }
+
+
+# def ytmusic_playlist(url, auth):
+#     if not auth:
+#         raise RuntimeError('Google YouTube authorization is required for YouTube Music playlist access.')
+
+#     client_id = os.environ.get('GOOGLE_YOUTUBE_CLIENT_ID')
+#     client_secret = os.environ.get('GOOGLE_YOUTUBE_CLIENT_SECRET')
+#     if not client_id or not client_secret:
+#         raise RuntimeError('Google YouTube OAuth client credentials are not configured on the server.')
+
+#     playlist_id = extract_playlist_id(url)
+#     token = {
+#         'access_token': str(auth.get('accessToken') or ''),
+#         'refresh_token': str(auth.get('refreshToken') or ''),
+#         'expires_at': int(auth.get('expiresAt') or 0),
+#         'expires_in': max(0, int((int(auth.get('expiresAt') or 0)) - __import__('time').time())),
+#         'scope': str(auth.get('scope') or 'https://www.googleapis.com/auth/youtube'),
+#         'token_type': str(auth.get('tokenType') or 'Bearer'),
+#     }
+#     if not token['access_token'] or not token['refresh_token']:
+#         raise RuntimeError('The Google YouTube OAuth token is incomplete. Connect YouTube again.')
+
+#     ytmusic = YTMusic(
+#         token,
+#         oauth_credentials=OAuthCredentials(client_id=client_id, client_secret=client_secret),
+#     )
+#     playlist = ytmusic.get_playlist(playlist_id, limit=None)
+#     formats = available_output_formats()
+
+#     tracks = []
+#     for idx, track in enumerate(playlist.get('tracks') or [], start=1):
+#         if not track or not track.get('videoId'):
+#             continue
+#         artists = track.get('artists') or []
+#         uploader = ', '.join(str(a.get('name')) for a in artists if isinstance(a, dict) and a.get('name')) or None
+#         thumbnails = track.get('thumbnails') or []
+#         thumbnail = thumbnails[-1].get('url') if thumbnails and isinstance(thumbnails[-1], dict) else None
+#         tracks.append({
+#             'id': str(track['videoId']),
+#             'title': track.get('title') or f'Track {idx}',
+#             'uploader': uploader,
+#             'duration': track.get('duration_seconds'),
+#             'url': f"https://www.youtube.com/watch?v={track['videoId']}",
+#             'index': idx,
+#             'thumbnail': thumbnail,
+#         })
+
+#     return {
+#         'type': 'playlist',
+#         'title': playlist.get('title') or 'YouTube Music Playlist',
+#         'thumbnail': None,
+#         'uploader': None,
+#         'duration': None,
+#         'url': url,
+#         'formats': [],
+#         'sourceBitrates': [],
+#         'outputFormats': formats,
+#         'tracks': tracks,
+#     }
 
 
 def progress_hook_factory(total, emit):

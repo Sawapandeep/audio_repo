@@ -56,6 +56,76 @@ function deriveLocalTitle(filename: string) {
   return stripped || filename;
 }
 
+function webClientId() {
+  const value = process.env.GOOGLE_YOUTUBE_WEB_CLIENT_ID?.trim();
+  if (!value) throw new Error('GOOGLE_YOUTUBE_WEB_CLIENT_ID is not configured on the server.');
+  return value;
+}
+
+function webClientSecret() {
+  const value = process.env.GOOGLE_YOUTUBE_WEB_CLIENT_SECRET?.trim();
+  if (!value) throw new Error('GOOGLE_YOUTUBE_WEB_CLIENT_SECRET is not configured on the server.');
+  return value;
+}
+
+function redirectUri() {
+  const value = process.env.GOOGLE_YOUTUBE_REDIRECT_URI?.trim();
+  if (!value) throw new Error('GOOGLE_YOUTUBE_REDIRECT_URI is not configured on the server.');
+  return value;
+}
+
+export function buildYouTubeAuthUrl(state: string) {
+  const params = new URLSearchParams({
+    client_id: webClientId(),
+    redirect_uri: redirectUri(),
+    response_type: 'code',
+    scope: YOUTUBE_SCOPE,
+    access_type: 'offline',
+    prompt: 'consent',
+    include_granted_scopes: 'true',
+    state,
+  });
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+}
+
+function createSessionFromToken(data: GoogleTokenResponse): YouTubeSession {
+  const refreshToken = data.refresh_token;
+  if (!refreshToken) {
+    throw new Error(
+      'Google did not return a refresh token. If re-testing, remove AudioDrop\'s prior access at ' +
+      'myaccount.google.com/permissions first, then try connecting again.'
+    );
+  }
+
+  const createdAt = Date.now();
+  const expiresAt = createdAt + ttlMs();
+  const token: YouTubeOAuthToken = {
+    accessToken: data.access_token,
+    refreshToken,
+    expiresAt: Date.now() + Math.max(60, Number(data.expires_in || 3600)) * 1000,
+    scope: data.scope || YOUTUBE_SCOPE,
+    tokenType: data.token_type || 'Bearer',
+  };
+
+  const session: YouTubeSession = { id: crypto.randomUUID(), token, createdAt, expiresAt };
+  sessions.set(session.id, session);
+  scheduleExpiry(session);
+  return session;
+}
+
+export async function completeYouTubeOAuthWebFlow(code: string) {
+  const data = await tokenRequest({
+    client_id: webClientId(),
+    client_secret: webClientSecret(),
+    code,
+    redirect_uri: redirectUri(),
+    grant_type: 'authorization_code',
+  });
+
+  const session = createSessionFromToken(data);
+  return { sessionId: session.id, expiresAt: new Date(session.expiresAt).toISOString() };
+}
+
 async function downloadBlob(
   url: string,
   format: string,
@@ -175,7 +245,25 @@ export default function Home() {
       setPrefsReady(true);
     })();
   }, []);
-
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sessionId = params.get('yt_session');
+    const expiresAt = params.get('yt_expires');
+    const ytError = params.get('yt_error');
+  
+    if (sessionId && expiresAt) {
+      setYoutubeSessionId(sessionId);
+      setYoutubeSessionExpiresAt(expiresAt);
+    } else if (ytError) {
+      setError(`Google authorization failed: ${ytError}`);
+    }
+  
+    if (sessionId || expiresAt || ytError) {
+      params.delete('yt_session'); params.delete('yt_expires'); params.delete('yt_error');
+      const qs = params.toString();
+      window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : ''));
+    }
+  }, []);
   useEffect(() => {
     if (!prefsReady) return;
     savePreferences({ format, quality });
@@ -233,7 +321,7 @@ export default function Home() {
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
-  
+
   async function connectYouTubeWithGoogle() {
     setYoutubeSessionBusy(true);
     setError('');
@@ -542,6 +630,8 @@ export default function Home() {
     }
   }
 
+  
+
   useEffect(() => {
     if (!watchEnabled || !directory || !syncUrl.trim()) return;
     const timer = setInterval(() => {
@@ -592,14 +682,17 @@ export default function Home() {
         ) : (
           <>
             <div className="syncActions">
-              <button
+              {/* <button
                 type="button"
                 className="primary"
                 onClick={() => void connectYouTubeWithGoogle()}
                 disabled={youtubeSessionBusy}
               >
                 {youtubeSessionBusy ? 'Waiting for Google…' : 'Connect Audio_drop with Google'}
-              </button>
+              </button> */}
+<button type="button" className="primary" onClick={() => { window.location.href = '/api/youtube/oauth/web-start'; }}>
+  Connect YouTube with Google
+</button>
             </div>
 
             {/* {youtubeOAuthInfo && (
@@ -611,7 +704,7 @@ export default function Home() {
                 <div className="syncNote">This page will automatically detect the approval. Do not share the code with anyone.</div>
               </div>
             )} */}
-            {youtubeOAuthInfo && (
+            {/* {youtubeOAuthInfo && (
   <div className="notice">
     <strong>Finish the Google sign-in</strong>
     <div style={{ marginTop: 8 }}>
@@ -654,7 +747,7 @@ export default function Home() {
 
     <div className="syncNote">This page will automatically detect the approval. Do not share the code with anyone.</div>
   </div>
-)}
+)} */}
 
             <div className="syncNote">
               Google OAuth is used only to obtain temporary YouTube access for playlist metadata. The Google password is entered only on Google&apos;s website and is never sent to AudioDrop.
@@ -830,4 +923,3 @@ export default function Home() {
     </main>
   );
 }
-
