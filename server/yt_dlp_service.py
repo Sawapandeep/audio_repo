@@ -329,7 +329,7 @@ def download_playlist(payload):
 def main():
     payload=json.loads(sys.stdin.read())
     action=payload.get('action')
-    if action=='ytmusic_playlist': result=ytmusic_playlist(payload['url'], payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
+    # if action=='ytmusic_playlist': result=ytmusic_playlist(payload['url'], payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
     if action=='analyze': result=analyze(payload['url'], payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
     if action=='download_single': result=download_single(payload['url'],payload.get('format','mp3'),int(payload.get('quality') or 192),bool(payload.get('includeId')), payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
     if action=='download_playlist': download_playlist(payload); return
