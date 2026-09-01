@@ -180,7 +180,60 @@ export default function Home() {
     if (!prefsReady) return;
     savePreferences({ format, quality });
   }, [format, quality, prefsReady]);
+  useEffect(() => {
+    async function resumePendingAuth() {
+      let saved: { deviceCode: string; verificationUrl: string; userCode: string; deadline: number; interval: number } | null = null;
+      try {
+        const raw = sessionStorage.getItem('audiodrop_oauth_pending');
+        if (raw) saved = JSON.parse(raw);
+      } catch {}
+      if (!saved || Date.now() >= saved.deadline) {
+        try { sessionStorage.removeItem('audiodrop_oauth_pending'); } catch {}
+        return;
+      }
 
+      setYoutubeOAuthInfo({ verificationUrl: saved.verificationUrl, userCode: saved.userCode });
+      setYoutubeSessionBusy(true);
+
+      while (Date.now() < saved.deadline) {
+        try {
+          const pollRes = await fetch('/api/youtube/oauth/poll', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ deviceCode: saved.deviceCode }),
+            cache: 'no-store',
+          });
+          const pollData = await pollRes.json().catch(() => ({}));
+
+          if (pollData.status === 'authorized') {
+            setYoutubeSessionId(pollData.sessionId);
+            setYoutubeSessionExpiresAt(pollData.expiresAt);
+            setYoutubeOAuthInfo(null);
+            try { sessionStorage.removeItem('audiodrop_oauth_pending'); } catch {}
+            break;
+          }
+          if (!pollRes.ok || pollData.status === 'error') {
+            setYoutubeOAuthInfo(null);
+            try { sessionStorage.removeItem('audiodrop_oauth_pending'); } catch {}
+            break;
+          }
+        } catch {
+          // Network hiccup while resuming — keep trying until the deadline.
+        }
+        await new Promise(resolve => setTimeout(resolve, Math.max(5, saved!.interval) * 1000));
+      }
+      setYoutubeSessionBusy(false);
+    }
+
+    resumePendingAuth();
+
+    function onVisible() {
+      if (document.visibilityState === 'visible') resumePendingAuth();
+    }
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+  
   async function connectYouTubeWithGoogle() {
     setYoutubeSessionBusy(true);
     setError('');
@@ -202,10 +255,20 @@ export default function Home() {
 
       // setYoutubeOAuthInfo({ verificationUrl, userCode });
       // try { window.open(verificationUrl, '_blank', 'noopener,noreferrer'); } catch { /* The visible link remains available below. */ }
+      // setYoutubeOAuthInfo({ verificationUrl, userCode });
+      // try { await navigator.clipboard.writeText(userCode); setCodeCopied(true); } catch { /* Clipboard can fail on non-HTTPS; code is still shown on screen. */ }
+      // try { window.open(verificationUrl, '_blank', 'noopener,noreferrer'); } catch { /* The visible link remains available below. */ }
+
       setYoutubeOAuthInfo({ verificationUrl, userCode });
       try { await navigator.clipboard.writeText(userCode); setCodeCopied(true); } catch { /* Clipboard can fail on non-HTTPS; code is still shown on screen. */ }
+      try {
+        sessionStorage.setItem('audiodrop_oauth_pending', JSON.stringify({
+          deviceCode, verificationUrl, userCode,
+          deadline: Date.now() + expiresIn * 1000,
+          interval,
+        }));
+      } catch { /* sessionStorage can be unavailable in some contexts; polling still works while the tab stays foregrounded. */ }
       try { window.open(verificationUrl, '_blank', 'noopener,noreferrer'); } catch { /* The visible link remains available below. */ }
-
 
       const deadline = Date.now() + expiresIn * 1000;
       while (Date.now() < deadline) {
@@ -218,10 +281,18 @@ export default function Home() {
         });
         const pollData = await pollRes.json().catch(() => ({}));
 
+        // if (pollData.status === 'authorized') {
+        //   setYoutubeSessionId(pollData.sessionId);
+        //   setYoutubeSessionExpiresAt(pollData.expiresAt);
+        //   setYoutubeOAuthInfo(null);
+        //   return;
+        // }
+
         if (pollData.status === 'authorized') {
           setYoutubeSessionId(pollData.sessionId);
           setYoutubeSessionExpiresAt(pollData.expiresAt);
           setYoutubeOAuthInfo(null);
+          try { sessionStorage.removeItem('audiodrop_oauth_pending'); } catch {}
           return;
         }
         if (!pollRes.ok || pollData.status === 'error') {
@@ -234,10 +305,19 @@ export default function Home() {
       const message = err instanceof Error ? err.message : 'Unable to connect YouTube with Google.';
       setError(message);
       setYoutubeOAuthInfo(null);
+      try { sessionStorage.removeItem('audiodrop_oauth_pending'); } catch {}
     } finally {
       setYoutubeSessionBusy(false);
     }
   }
+      //   } catch (err) {
+  //     const message = err instanceof Error ? err.message : 'Unable to connect YouTube with Google.';
+  //     setError(message);
+  //     setYoutubeOAuthInfo(null);
+  //   } finally {
+  //     setYoutubeSessionBusy(false);
+  //   }
+  // }
 
   async function disconnectYouTube() {
     const id = youtubeSessionId;
