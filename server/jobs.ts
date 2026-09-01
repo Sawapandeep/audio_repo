@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { releaseYouTubeSession } from './youtube-session';
+import { getYouTubeSession, releaseYouTubeSession, youtubeAuthForPython } from './youtube-session';
 
 export type JobTrack = {
   id: string;
@@ -51,6 +51,7 @@ async function run(job:Job, input:{
   const dir = path.join(tempRoot, job.id); await fs.mkdir(dir, {recursive:true});
   try {
     job.status='running';
+    const session = input.youtubeSessionId ? await getYouTubeSession(input.youtubeSessionId) : null;
     const child = spawn(
       process.env.PYTHON_BIN ||
         (process.platform === 'win32' ? 'python' : 'python3'),
@@ -77,6 +78,7 @@ async function run(job:Job, input:{
       format:input.format,
       quality:input.quality,
       tracks:input.tracks,
+      youtubeAuth: session ? youtubeAuthForPython(session) : undefined,
     }));
     await new Promise<void>((resolve,reject)=>child.on('close', code=>code===0?resolve():reject(new Error(stderr.trim() || last || 'Playlist download failed.'))));
     if (!job.filePath) throw new Error('Playlist finished without an output file.');

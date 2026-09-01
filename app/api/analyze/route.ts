@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
 import { validateSourceUrl, isYouTubePlaylistUrl } from '@/server/validate-url';
 import { runYtDlp } from '@/server/runner';
 import { getYouTubeSession, youtubeAuthForPython } from '@/server/youtube-session';
@@ -10,12 +11,15 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const url = validateSourceUrl(body?.url);
-    const session = body?.youtubeSessionId
-      ? await getYouTubeSession(body.youtubeSessionId)
-      : null;
+    const cookieJar = await cookies();
+    const cookieSessionId = cookieJar.get('audiodrop_youtube_session')?.value;
+    const sessionId = cookieSessionId || (
+      typeof body?.youtubeSessionId === 'string' ? body.youtubeSessionId : ''
+    );
+    const session = sessionId ? await getYouTubeSession(sessionId) : null;
 
-    // Private/authenticated YouTube Music playlists are resolved by ytmusicapi.
-    // yt-dlp remains responsible for the actual media download.
+    // Authenticated playlist metadata is resolved through the YouTube Data API.
+    // yt-dlp remains responsible for actual media extraction/download.
     if (session && isYouTubePlaylistUrl(url)) {
       const result = await runYtDlp({
         action: 'ytmusic_playlist',

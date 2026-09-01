@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
 import { validateSourceUrl, isYouTubePlaylistUrl } from '@/server/validate-url';
 import { runYtDlp } from '@/server/runner';
 import { getYouTubeSession, youtubeAuthForPython } from '@/server/youtube-session';
@@ -28,9 +29,12 @@ export async function POST(request: Request) {
     const existingIds = new Set(
       Array.isArray(body?.existingIds) ? body.existingIds.map(String) : []
     );
-    const session = body?.youtubeSessionId
-      ? await getYouTubeSession(body.youtubeSessionId)
-      : null;
+    const cookieJar = await cookies();
+    const cookieSessionId = cookieJar.get('audiodrop_youtube_session')?.value;
+    const sessionId = cookieSessionId || (
+      typeof body?.youtubeSessionId === 'string' ? body.youtubeSessionId : ''
+    );
+    const session = sessionId ? await getYouTubeSession(sessionId) : null;
 
     if (!session) {
       throw new Error('Connect YouTube with Google before syncing a YouTube Music playlist.');

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
 import { validateSourceUrl } from '@/server/validate-url';
 import { createPlaylistJob, type JobTrack } from '@/server/jobs';
 import { getYouTubeSession } from '@/server/youtube-session';
@@ -25,9 +26,12 @@ export async function POST(request: Request) {
 
     const format = typeof body?.format === 'string' ? body.format : 'mp3';
     const quality = Number(body?.quality || 192);
-    const session = body?.youtubeSessionId
-      ? await getYouTubeSession(body.youtubeSessionId)
-      : null;
+    const cookieJar = await cookies();
+    const cookieSessionId = cookieJar.get('audiodrop_youtube_session')?.value;
+    const sessionId = cookieSessionId || (
+      typeof body?.youtubeSessionId === 'string' ? body.youtubeSessionId : ''
+    );
+    const session = sessionId ? await getYouTubeSession(sessionId) : null;
 
     return NextResponse.json(await createPlaylistJob({
       url,
@@ -35,7 +39,7 @@ export async function POST(request: Request) {
       quality,
       selected: tracks.map(track => track.id),
       tracks,
-      youtubeSessionId: session ? String(body.youtubeSessionId) : null,
+      youtubeSessionId: session ? session.id : null,
     }));
   } catch (error) {
     return NextResponse.json({error:error instanceof Error ? error.message : 'Unable to start job.'},{status:400});

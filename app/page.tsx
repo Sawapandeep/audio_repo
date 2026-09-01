@@ -56,81 +56,11 @@ function deriveLocalTitle(filename: string) {
   return stripped || filename;
 }
 
-function webClientId() {
-  const value = process.env.GOOGLE_YOUTUBE_WEB_CLIENT_ID?.trim();
-  if (!value) throw new Error('GOOGLE_YOUTUBE_WEB_CLIENT_ID is not configured on the server.');
-  return value;
-}
-
-function webClientSecret() {
-  const value = process.env.GOOGLE_YOUTUBE_WEB_CLIENT_SECRET?.trim();
-  if (!value) throw new Error('GOOGLE_YOUTUBE_WEB_CLIENT_SECRET is not configured on the server.');
-  return value;
-}
-
-function redirectUri() {
-  const value = process.env.GOOGLE_YOUTUBE_REDIRECT_URI?.trim();
-  if (!value) throw new Error('GOOGLE_YOUTUBE_REDIRECT_URI is not configured on the server.');
-  return value;
-}
-
-export function buildYouTubeAuthUrl(state: string) {
-  const params = new URLSearchParams({
-    client_id: webClientId(),
-    redirect_uri: redirectUri(),
-    response_type: 'code',
-    scope: YOUTUBE_SCOPE,
-    access_type: 'offline',
-    prompt: 'consent',
-    include_granted_scopes: 'true',
-    state,
-  });
-  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-}
-
-function createSessionFromToken(data: GoogleTokenResponse): YouTubeSession {
-  const refreshToken = data.refresh_token;
-  if (!refreshToken) {
-    throw new Error(
-      'Google did not return a refresh token. If re-testing, remove AudioDrop\'s prior access at ' +
-      'myaccount.google.com/permissions first, then try connecting again.'
-    );
-  }
-
-  const createdAt = Date.now();
-  const expiresAt = createdAt + ttlMs();
-  const token: YouTubeOAuthToken = {
-    accessToken: data.access_token,
-    refreshToken,
-    expiresAt: Date.now() + Math.max(60, Number(data.expires_in || 3600)) * 1000,
-    scope: data.scope || YOUTUBE_SCOPE,
-    tokenType: data.token_type || 'Bearer',
-  };
-
-  const session: YouTubeSession = { id: crypto.randomUUID(), token, createdAt, expiresAt };
-  sessions.set(session.id, session);
-  scheduleExpiry(session);
-  return session;
-}
-
-export async function completeYouTubeOAuthWebFlow(code: string) {
-  const data = await tokenRequest({
-    client_id: webClientId(),
-    client_secret: webClientSecret(),
-    code,
-    redirect_uri: redirectUri(),
-    grant_type: 'authorization_code',
-  });
-
-  const session = createSessionFromToken(data);
-  return { sessionId: session.id, expiresAt: new Date(session.expiresAt).toISOString() };
-}
 
 async function downloadBlob(
   url: string,
   format: string,
   quality: number,
-  youtubeSessionId?: string | null,
 ) {
   const res = await fetch('/api/download', {
     method: 'POST',
@@ -140,7 +70,6 @@ async function downloadBlob(
       format,
       quality,
       includeId: true,
-      youtubeSessionId: youtubeSessionId || undefined,
     }),
   });
   if (!res.ok) {
@@ -211,17 +140,6 @@ export default function Home() {
   const [youtubeSessionId, setYoutubeSessionId] = useState<string | null>(null);
   const [youtubeSessionExpiresAt, setYoutubeSessionExpiresAt] = useState<string | null>(null);
   const [youtubeSessionBusy, setYoutubeSessionBusy] = useState(false);
-  const [youtubeOAuthInfo, setYoutubeOAuthInfo] = useState<{ verificationUrl: string; userCode: string } | null>(null);
-  const [codeCopied, setCodeCopied] = useState(false); // NEW
-  async function copyOAuthCode(code: string) {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCodeCopied(true);
-      setTimeout(() => setCodeCopied(false), 2000);
-    } catch {
-      // Clipboard API can fail on non-HTTPS or unsupported browsers; the code is still visible to copy manually.
-    }
-  }
   const selectedCount = selected.length;
   const currentFormat = useMemo(() => analysis?.outputFormats.find(x => x.ext === format), [analysis, format]);
   const reviewCurrentFormat = useMemo(
@@ -247,19 +165,11 @@ export default function Home() {
   }, []);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const sessionId = params.get('yt_session');
-    const expiresAt = params.get('yt_expires');
     const ytError = params.get('yt_error');
-  
-    if (sessionId && expiresAt) {
-      setYoutubeSessionId(sessionId);
-      setYoutubeSessionExpiresAt(expiresAt);
-    } else if (ytError) {
-      setError(`Google authorization failed: ${ytError}`);
-    }
-  
-    if (sessionId || expiresAt || ytError) {
-      params.delete('yt_session'); params.delete('yt_expires'); params.delete('yt_error');
+    if (ytError) setError(`Google authorization failed: ${ytError}`);
+    if (params.has('yt_connected') || ytError) {
+      params.delete('yt_connected');
+      params.delete('yt_error');
       const qs = params.toString();
       window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : ''));
     }
@@ -269,154 +179,29 @@ export default function Home() {
     savePreferences({ format, quality });
   }, [format, quality, prefsReady]);
   useEffect(() => {
-    async function resumePendingAuth() {
-      let saved: { deviceCode: string; verificationUrl: string; userCode: string; deadline: number; interval: number } | null = null;
+    let cancelled = false;
+    (async () => {
       try {
-        const raw = sessionStorage.getItem('audiodrop_oauth_pending');
-        if (raw) saved = JSON.parse(raw);
-      } catch {}
-      if (!saved || Date.now() >= saved.deadline) {
-        try { sessionStorage.removeItem('audiodrop_oauth_pending'); } catch {}
-        return;
-      }
-
-      setYoutubeOAuthInfo({ verificationUrl: saved.verificationUrl, userCode: saved.userCode });
-      setYoutubeSessionBusy(true);
-
-      while (Date.now() < saved.deadline) {
-        try {
-          const pollRes = await fetch('/api/youtube/oauth/poll', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ deviceCode: saved.deviceCode }),
-            cache: 'no-store',
-          });
-          const pollData = await pollRes.json().catch(() => ({}));
-
-          if (pollData.status === 'authorized') {
-            setYoutubeSessionId(pollData.sessionId);
-            setYoutubeSessionExpiresAt(pollData.expiresAt);
-            setYoutubeOAuthInfo(null);
-            try { sessionStorage.removeItem('audiodrop_oauth_pending'); } catch {}
-            break;
-          }
-          if (!pollRes.ok || pollData.status === 'error') {
-            setYoutubeOAuthInfo(null);
-            try { sessionStorage.removeItem('audiodrop_oauth_pending'); } catch {}
-            break;
-          }
-        } catch {
-          // Network hiccup while resuming — keep trying until the deadline.
+        const res = await fetch('/api/youtube/session', { cache: 'no-store' });
+        const data = await res.json();
+        if (!cancelled && data.connected) {
+          setYoutubeSessionId('cookie');
+          setYoutubeSessionExpiresAt(data.expiresAt);
         }
-        await new Promise(resolve => setTimeout(resolve, Math.max(5, saved!.interval) * 1000));
+      } catch {
+        // Not connected is a valid initial state.
       }
-      setYoutubeSessionBusy(false);
-    }
-
-    resumePendingAuth();
-
-    function onVisible() {
-      if (document.visibilityState === 'visible') resumePendingAuth();
-    }
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    })();
+    return () => { cancelled = true; };
   }, []);
-
-  async function connectYouTubeWithGoogle() {
-    setYoutubeSessionBusy(true);
-    setError('');
-    setSyncError('');
-    setYoutubeOAuthInfo(null);
-    setCodeCopied(false);
-
-    try {
-      const startRes = await fetch('/api/youtube/oauth/start', { method: 'POST', cache: 'no-store' });
-      const startData = await startRes.json().catch(() => ({}));
-      if (!startRes.ok) throw new Error(startData.error || 'Unable to start Google YouTube authorization.');
-
-      const deviceCode = String(startData.deviceCode || '');
-      const verificationUrl = String(startData.verificationUrl || '');
-      const userCode = String(startData.userCode || '');
-      const expiresIn = Math.max(60, Number(startData.expiresIn || 1800));
-      const interval = Math.max(5, Number(startData.interval || 5));
-      if (!deviceCode || !verificationUrl || !userCode) throw new Error('Google did not return a valid device authorization request.');
-
-      // setYoutubeOAuthInfo({ verificationUrl, userCode });
-      // try { window.open(verificationUrl, '_blank', 'noopener,noreferrer'); } catch { /* The visible link remains available below. */ }
-      // setYoutubeOAuthInfo({ verificationUrl, userCode });
-      // try { await navigator.clipboard.writeText(userCode); setCodeCopied(true); } catch { /* Clipboard can fail on non-HTTPS; code is still shown on screen. */ }
-      // try { window.open(verificationUrl, '_blank', 'noopener,noreferrer'); } catch { /* The visible link remains available below. */ }
-
-      setYoutubeOAuthInfo({ verificationUrl, userCode });
-      try { await navigator.clipboard.writeText(userCode); setCodeCopied(true); } catch { /* Clipboard can fail on non-HTTPS; code is still shown on screen. */ }
-      try {
-        sessionStorage.setItem('audiodrop_oauth_pending', JSON.stringify({
-          deviceCode, verificationUrl, userCode,
-          deadline: Date.now() + expiresIn * 1000,
-          interval,
-        }));
-      } catch { /* sessionStorage can be unavailable in some contexts; polling still works while the tab stays foregrounded. */ }
-      try { window.open(verificationUrl, '_blank', 'noopener,noreferrer'); } catch { /* The visible link remains available below. */ }
-
-      const deadline = Date.now() + expiresIn * 1000;
-      while (Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, interval * 1000));
-        const pollRes = await fetch('/api/youtube/oauth/poll', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ deviceCode }),
-          cache: 'no-store',
-        });
-        const pollData = await pollRes.json().catch(() => ({}));
-
-        // if (pollData.status === 'authorized') {
-        //   setYoutubeSessionId(pollData.sessionId);
-        //   setYoutubeSessionExpiresAt(pollData.expiresAt);
-        //   setYoutubeOAuthInfo(null);
-        //   return;
-        // }
-
-        if (pollData.status === 'authorized') {
-          setYoutubeSessionId(pollData.sessionId);
-          setYoutubeSessionExpiresAt(pollData.expiresAt);
-          setYoutubeOAuthInfo(null);
-          try { sessionStorage.removeItem('audiodrop_oauth_pending'); } catch {}
-          return;
-        }
-        if (!pollRes.ok || pollData.status === 'error') {
-          throw new Error(pollData.error || 'Google authorization failed.');
-        }
-      }
-
-      throw new Error('The Google authorization request expired. Connect YouTube again.');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unable to connect YouTube with Google.';
-      setError(message);
-      setYoutubeOAuthInfo(null);
-      try { sessionStorage.removeItem('audiodrop_oauth_pending'); } catch {}
-    } finally {
-      setYoutubeSessionBusy(false);
-    }
-  }
-      //   } catch (err) {
-  //     const message = err instanceof Error ? err.message : 'Unable to connect YouTube with Google.';
-  //     setError(message);
-  //     setYoutubeOAuthInfo(null);
-  //   } finally {
-  //     setYoutubeSessionBusy(false);
-  //   }
-  // }
-
   async function disconnectYouTube() {
-    const id = youtubeSessionId;
-    setYoutubeSessionId(null);
-    setYoutubeSessionExpiresAt(null);
-    setYoutubeOAuthInfo(null);
-    if (!id) return;
+    setYoutubeSessionBusy(true);
     try {
-      await fetch(`/api/youtube/session?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
-    } catch {
-      // The server-side TTL is the safety net if the release request is interrupted.
+      await fetch('/api/youtube/session', { method: 'DELETE', cache: 'no-store' });
+    } finally {
+      setYoutubeSessionId(null);
+      setYoutubeSessionExpiresAt(null);
+      setYoutubeSessionBusy(false);
     }
   }
 
@@ -431,7 +216,7 @@ export default function Home() {
     e?.preventDefault();
     setLoading(true); setError(''); setAnalysis(null); setJob(null);
     try {
-      const res = await fetch('/api/analyze', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ url, youtubeSessionId: youtubeSessionId || undefined }) });
+      const res = await fetch('/api/analyze', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ url }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to analyze this URL.');
       setAnalysis(data);
@@ -446,10 +231,10 @@ export default function Home() {
     if (!analysis) return;
     setLoading(true); setError('');
     try {
-      const { blob, name } = await downloadBlob(analysis.url, format, quality, youtubeSessionId);
+      const { blob, name } = await downloadBlob(analysis.url, format, quality);
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-      // if (youtubeSessionId) await disconnectYouTube();
+      if (youtubeSessionId) await disconnectYouTube();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Download failed.');
       // if (youtubeSessionId) await disconnectYouTube();
@@ -467,7 +252,6 @@ export default function Home() {
           quality,
           selected,
           tracks: analysis.tracks.filter(track => selected.includes(track.id)),
-          youtubeSessionId: youtubeSessionId || undefined,
         }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Unable to start playlist download.');
@@ -483,8 +267,7 @@ export default function Home() {
       const data = await res.json();
       setJob(data);
       if ((data.status === 'completed' || data.status === 'failed') && youtubeSessionId) {
-        setYoutubeSessionId(null);
-        setYoutubeSessionExpiresAt(null);
+        void disconnectYouTube();
       }
     }, 800);
     return () => clearInterval(timer);
@@ -508,7 +291,6 @@ export default function Home() {
         body: JSON.stringify({
             url: playlistUrl.trim(),
             existingIds: [...localFiles.keys()],
-            youtubeSessionId: youtubeSessionId || undefined,
           }),
       });
       const data = await res.json();
@@ -607,7 +389,6 @@ export default function Home() {
           track.url,
           format,
           quality,
-          youtubeSessionId,
         );
         await saveToDirectory(directory, name, blob);
         setReviewProgress({ done: i + 1, total: toDownload.length, current: track.title });
@@ -621,7 +402,7 @@ export default function Home() {
       setSyncHistory(loadSyncHistory());
       setReviewOpen(false);
       setReviewData(null);
-      // if (youtubeSessionId) await disconnectYouTube();
+      if (youtubeSessionId) await disconnectYouTube();
     } catch (err) {
       setSyncError(err instanceof Error ? err.message : 'Sync download failed.');
       // if (youtubeSessionId) await disconnectYouTube();
@@ -666,14 +447,14 @@ export default function Home() {
               AudioDrop never asks for your Google password.
             </div>
           </div>
-          <span className="badge">{youtubeSessionId ? 'Connected' : youtubeOAuthInfo ? 'Waiting for Google' : 'Not connected'}</span>
+          <span className="badge">{youtubeSessionId ? 'Connected' : 'Not connected'}</span>
         </div>
 
         {youtubeSessionId ? (
           <div className="youtubeConnected">
             <div>
               <strong>● YouTube access active</strong>
-              <div className="syncNote">{youtubeSessionLabel()}. The temporary authorization is revoked when you disconnect or the safety timeout expires.</div>
+              <div className="syncNote">{youtubeSessionLabel()}. The temporary authorization is revoked when you disconnect, after a task completes, or when the safety timeout expires.</div>
             </div>
             <button type="button" className="secondary" onClick={disconnectYouTube} disabled={youtubeSessionBusy || loading || syncing || downloadingReview}>
               Disconnect
@@ -682,73 +463,15 @@ export default function Home() {
         ) : (
           <>
             <div className="syncActions">
-              {/* <button
+              <button
                 type="button"
                 className="primary"
-                onClick={() => void connectYouTubeWithGoogle()}
-                disabled={youtubeSessionBusy}
+                onClick={() => { window.location.href = '/api/youtube/oauth/web-start'; }}
+                disabled={youtubeSessionBusy || loading || syncing || downloadingReview}
               >
-                {youtubeSessionBusy ? 'Waiting for Google…' : 'Connect Audio_drop with Google'}
-              </button> */}
-<button type="button" className="primary" onClick={() => { window.location.href = '/api/youtube/oauth/web-start'; }}>
-  Connect YouTube with Google
-</button>
+                Connect YouTube with Google
+              </button>
             </div>
-
-            {/* {youtubeOAuthInfo && (
-              <div className="notice">
-                <strong>Finish the Google sign-in</strong>
-                <div style={{ marginTop: 8 }}>Open Google, enter this one-time code, then press <strong>Allow</strong>:</div>
-                <div style={{ fontSize: 24, fontWeight: 900, letterSpacing: '.08em', margin: '10px 0' }}>{youtubeOAuthInfo.userCode}</div>
-                <a className="secondary" href={youtubeOAuthInfo.verificationUrl} target="_blank" rel="noreferrer">Open Google authorization</a>
-                <div className="syncNote">This page will automatically detect the approval. Do not share the code with anyone.</div>
-              </div>
-            )} */}
-            {/* {youtubeOAuthInfo && (
-  <div className="notice">
-    <strong>Finish the Google sign-in</strong>
-    <div style={{ marginTop: 8 }}>
-      A Google tab should have opened automatically. Tap the code to copy it, paste it there, then press <strong>Allow</strong>:
-    </div>
-
-    <button
-      type="button"
-      onClick={() => copyOAuthCode(youtubeOAuthInfo.userCode)}
-      style={{
-        display: 'block',
-        width: '100%',
-        margin: '10px 0',
-        padding: '14px 12px',
-        fontSize: 26,
-        fontWeight: 900,
-        letterSpacing: '.08em',
-        textAlign: 'center',
-        fontFamily: 'monospace',
-        background: codeCopied ? '#e6f7ec' : '#f4f4f5',
-        border: '2px dashed #999',
-        borderRadius: 10,
-        cursor: 'pointer',
-      }}
-    >
-      {youtubeOAuthInfo.userCode}
-    </button>
-    <div style={{ fontSize: 13, marginTop: -4, marginBottom: 10, textAlign: 'center' }}>
-      {codeCopied ? '✓ Copied — paste it into the Google tab' : 'Tap to copy'}
-    </div>
-
-    <a
-      className="secondary"
-      href={youtubeOAuthInfo.verificationUrl}
-      target="_blank"
-      rel="noreferrer"
-    >
-      Didn&apos;t open? Open Google authorization
-    </a>
-
-    <div className="syncNote">This page will automatically detect the approval. Do not share the code with anyone.</div>
-  </div>
-)} */}
-
             <div className="syncNote">
               Google OAuth is used only to obtain temporary YouTube access for playlist metadata. The Google password is entered only on Google&apos;s website and is never sent to AudioDrop.
             </div>

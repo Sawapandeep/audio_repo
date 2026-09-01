@@ -1,11 +1,12 @@
 import crypto from 'node:crypto';
 
 const DEFAULT_TTL_SECONDS = 15 * 60;
+const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
-const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube';
+export const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube';
 
-type GoogleTokenResponse = {
+export type GoogleTokenResponse = {
   access_token: string;
   expires_in: number;
   refresh_token?: string;
@@ -28,24 +29,47 @@ export type YouTubeSession = {
   expiresAt: number;
 };
 
+// This is intentionally process-local. AudioDrop is currently a personal,
+// single-service deployment on Render. A database/Redis session store is not
+// necessary unless the app later becomes multi-instance/multi-user.
 const sessions = new Map<string, YouTubeSession>();
 
-function clientId() {
-  const value = process.env.GOOGLE_YOUTUBE_CLIENT_ID?.trim();
-  if (!value) throw new Error('GOOGLE_YOUTUBE_CLIENT_ID is not configured on the server.');
+function requiredEnv(name: string) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is not configured on the server.`);
   return value;
 }
 
+function clientId() {
+  return requiredEnv('GOOGLE_YOUTUBE_CLIENT_ID');
+}
+
 function clientSecret() {
-  const value = process.env.GOOGLE_YOUTUBE_CLIENT_SECRET?.trim();
-  if (!value) throw new Error('GOOGLE_YOUTUBE_CLIENT_SECRET is not configured on the server.');
-  return value;
+  return requiredEnv('GOOGLE_YOUTUBE_CLIENT_SECRET');
+}
+
+function redirectUri() {
+  return requiredEnv('GOOGLE_YOUTUBE_REDIRECT_URI');
 }
 
 function ttlMs() {
   const configured = Number(process.env.YOUTUBE_OAUTH_SESSION_TTL_SECONDS || DEFAULT_TTL_SECONDS);
   if (!Number.isFinite(configured)) return DEFAULT_TTL_SECONDS * 1000;
   return Math.min(Math.max(Math.round(configured), 60), 60 * 60) * 1000;
+}
+
+export function buildYouTubeAuthUrl(state: string) {
+  const params = new URLSearchParams({
+    client_id: clientId(),
+    redirect_uri: redirectUri(),
+    response_type: 'code',
+    scope: YOUTUBE_SCOPE,
+    access_type: 'offline',
+    prompt: 'consent',
+    include_granted_scopes: 'true',
+    state,
+  });
+  return `${GOOGLE_AUTH_URL}?${params.toString()}`;
 }
 
 async function tokenRequest(params: Record<string, string>) {
@@ -69,47 +93,14 @@ async function tokenRequest(params: Record<string, string>) {
   return data as GoogleTokenResponse;
 }
 
-export async function startYouTubeOAuth() {
-  const response = await fetch('https://oauth2.googleapis.com/device/code', {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: clientId(),
-      scope: YOUTUBE_SCOPE,
-    }),
-    cache: 'no-store',
-  });
-
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+function createSessionFromToken(data: GoogleTokenResponse): YouTubeSession {
+  if (!data.access_token) throw new Error('Google did not return an access token.');
+  const refreshToken = data.refresh_token;
+  if (!refreshToken) {
     throw new Error(
-      typeof data?.error_description === 'string'
-        ? data.error_description
-        : typeof data?.error === 'string'
-          ? data.error
-          : 'Unable to start Google YouTube authorization.'
+      "Google did not return a refresh token. If AudioDrop was already authorized, remove AudioDrop's access from your Google Account and connect again."
     );
   }
-
-  return {
-    deviceCode: String(data.device_code),
-    userCode: String(data.user_code),
-    verificationUrl: String(data.verification_url),
-    expiresIn: Number(data.expires_in || 1800),
-    interval: Math.max(5, Number(data.interval || 5)),
-  };
-}
-
-export async function completeYouTubeOAuth(deviceCode: string) {
-  const data = await tokenRequest({
-    client_id: clientId(),
-    client_secret: clientSecret(),
-    device_code: deviceCode,
-    grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-  });
-
-  const refreshToken = data.refresh_token;
-  if (!refreshToken) throw new Error('Google did not return a refresh token. Please authorize AudioDrop again.');
 
   const createdAt = Date.now();
   const expiresAt = createdAt + ttlMs();
@@ -130,7 +121,22 @@ export async function completeYouTubeOAuth(deviceCode: string) {
 
   sessions.set(session.id, session);
   scheduleExpiry(session);
+  return session;
+}
 
+export async function completeYouTubeOAuthWebFlow(code: string) {
+  const cleanCode = code.trim();
+  if (!cleanCode) throw new Error('Google authorization code is missing.');
+
+  const data = await tokenRequest({
+    client_id: clientId(),
+    client_secret: clientSecret(),
+    code: cleanCode,
+    redirect_uri: redirectUri(),
+    grant_type: 'authorization_code',
+  });
+
+  const session = createSessionFromToken(data);
   return {
     sessionId: session.id,
     expiresAt: new Date(session.expiresAt).toISOString(),
@@ -182,7 +188,9 @@ export async function getYouTubeSession(sessionId: unknown): Promise<YouTubeSess
   }
 
   const session = sessions.get(sessionId);
-  if (!session) throw new Error('The temporary YouTube access session has expired. Connect YouTube again.');
+  if (!session) {
+    throw new Error('The temporary YouTube access session has expired. Connect YouTube again.');
+  }
 
   if (Date.now() >= session.expiresAt) {
     await removeSession(session, true);
@@ -215,4 +223,14 @@ export async function releaseYouTubeSession(sessionId: unknown) {
   if (typeof sessionId !== 'string' || !sessionId) return;
   const session = sessions.get(sessionId);
   if (session) await removeSession(session, true);
+}
+
+export function youtubeSessionCookieOptions(maxAge: number) {
+  return {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax' as const,
+    path: '/',
+    maxAge,
+  };
 }

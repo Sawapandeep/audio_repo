@@ -12,7 +12,6 @@ from pathlib import Path
 
 try:
     import yt_dlp
-    from ytmusicapi import OAuthCredentials, YTMusic
 except Exception as exc:
     print(json.dumps({'error': f'yt-dlp is not installed or could not be imported: {exc}'}))
     raise SystemExit(1)
@@ -108,6 +107,12 @@ def entry_url(entry):
 
 def analyze(url, auth=None):
     formats = available_output_formats()
+    # When a temporary Google session is present, use the YouTube Data API for
+    # playlist metadata. This is the path that allows private playlists to be
+    # enumerated without giving yt-dlp a long-lived browser cookie jar.
+    if auth and ('list=' in url):
+        return youtube_playlist(url, auth)
+
     opts = apply_youtube_auth(base_opts() | {'skip_download': True}, auth)
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -229,65 +234,6 @@ def youtube_playlist(url, auth):
     }
 
 
-# def ytmusic_playlist(url, auth):
-#     if not auth:
-#         raise RuntimeError('Google YouTube authorization is required for YouTube Music playlist access.')
-
-#     client_id = os.environ.get('GOOGLE_YOUTUBE_CLIENT_ID')
-#     client_secret = os.environ.get('GOOGLE_YOUTUBE_CLIENT_SECRET')
-#     if not client_id or not client_secret:
-#         raise RuntimeError('Google YouTube OAuth client credentials are not configured on the server.')
-
-#     playlist_id = extract_playlist_id(url)
-#     token = {
-#         'access_token': str(auth.get('accessToken') or ''),
-#         'refresh_token': str(auth.get('refreshToken') or ''),
-#         'expires_at': int(auth.get('expiresAt') or 0),
-#         'expires_in': max(0, int((int(auth.get('expiresAt') or 0)) - __import__('time').time())),
-#         'scope': str(auth.get('scope') or 'https://www.googleapis.com/auth/youtube'),
-#         'token_type': str(auth.get('tokenType') or 'Bearer'),
-#     }
-#     if not token['access_token'] or not token['refresh_token']:
-#         raise RuntimeError('The Google YouTube OAuth token is incomplete. Connect YouTube again.')
-
-#     ytmusic = YTMusic(
-#         token,
-#         oauth_credentials=OAuthCredentials(client_id=client_id, client_secret=client_secret),
-#     )
-#     playlist = ytmusic.get_playlist(playlist_id, limit=None)
-#     formats = available_output_formats()
-
-#     tracks = []
-#     for idx, track in enumerate(playlist.get('tracks') or [], start=1):
-#         if not track or not track.get('videoId'):
-#             continue
-#         artists = track.get('artists') or []
-#         uploader = ', '.join(str(a.get('name')) for a in artists if isinstance(a, dict) and a.get('name')) or None
-#         thumbnails = track.get('thumbnails') or []
-#         thumbnail = thumbnails[-1].get('url') if thumbnails and isinstance(thumbnails[-1], dict) else None
-#         tracks.append({
-#             'id': str(track['videoId']),
-#             'title': track.get('title') or f'Track {idx}',
-#             'uploader': uploader,
-#             'duration': track.get('duration_seconds'),
-#             'url': f"https://www.youtube.com/watch?v={track['videoId']}",
-#             'index': idx,
-#             'thumbnail': thumbnail,
-#         })
-
-#     return {
-#         'type': 'playlist',
-#         'title': playlist.get('title') or 'YouTube Music Playlist',
-#         'thumbnail': None,
-#         'uploader': None,
-#         'duration': None,
-#         'url': url,
-#         'formats': [],
-#         'sourceBitrates': [],
-#         'outputFormats': formats,
-#         'tracks': tracks,
-#     }
-
 
 def progress_hook_factory(total, emit):
     completed=0; current=''
@@ -342,6 +288,7 @@ def download_playlist(payload):
     output_dir=Path(payload['outputDir']); output_dir.mkdir(parents=True,exist_ok=True)
     ext=payload['format']; quality=int(payload.get('quality') or 192)
     tracks=payload.get('tracks') or []
+    auth=payload.get('youtubeAuth')
     entries=[]
     for track in tracks:
         if not isinstance(track, dict):
@@ -393,7 +340,3 @@ try:
 except Exception as exc:
     print(json.dumps({'error': str(exc)}), flush=True)
     raise SystemExit(1)
-
-
-
-
