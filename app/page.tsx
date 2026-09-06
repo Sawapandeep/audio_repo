@@ -37,6 +37,16 @@ type ReviewData = {
   outputFormats: AudioFormat[];
   checkedAt: string;
 };
+type YouTubePlaylist = {
+  id: string;
+  title: string;
+  description?: string;
+  thumbnail?: string | null;
+  trackCount: number;
+  privacyStatus?: string;
+  publishedAt?: string | null;
+  url: string;
+};
 
 const qualities = [128, 192, 256, 320];
 
@@ -140,6 +150,12 @@ export default function Home() {
   const [youtubeSessionId, setYoutubeSessionId] = useState<string | null>(null);
   const [youtubeSessionExpiresAt, setYoutubeSessionExpiresAt] = useState<string | null>(null);
   const [youtubeSessionBusy, setYoutubeSessionBusy] = useState(false);
+  const [playlistPickerOpen, setPlaylistPickerOpen] = useState(false);
+const [playlistPickerLoading, setPlaylistPickerLoading] = useState(false);
+const [playlistPickerError, setPlaylistPickerError] = useState('');
+const [youtubePlaylists, setYoutubePlaylists] = useState<YouTubePlaylist[]>([]);
+const [playlistSearch, setPlaylistSearch] = useState('');
+const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
   const selectedCount = selected.length;
   const currentFormat = useMemo(() => analysis?.outputFormats.find(x => x.ext === format), [analysis, format]);
   const reviewCurrentFormat = useMemo(
@@ -319,6 +335,92 @@ export default function Home() {
     } finally {
       setSyncing(false);
     }
+  }
+
+  async function fetchMyPlaylists() {
+    if (!youtubeSessionId) {
+      setSyncError(
+        'Connect YouTube with Google before fetching your playlists.'
+      );
+      return;
+    }
+  
+    setPlaylistPickerLoading(true);
+    setPlaylistPickerError('');
+    setPlaylistSearch('');
+    setSelectedPlaylistId(null);
+  
+    try {
+      const res = await fetch('/api/youtube/playlists', {
+        cache: 'no-store',
+      });
+  
+      const data = await res.json();
+  
+      if (!res.ok) {
+        throw new Error(
+          data.error || 'Unable to fetch your playlists.'
+        );
+      }
+  
+      setYoutubePlaylists(
+        Array.isArray(data.playlists)
+          ? data.playlists
+          : []
+      );
+  
+      setPlaylistPickerOpen(true);
+    } catch (err) {
+      setPlaylistPickerError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to fetch your playlists.'
+      );
+    } finally {
+      setPlaylistPickerLoading(false);
+    }
+  }
+
+  async function syncSelectedPlaylist() {
+    const playlist = youtubePlaylists.find(
+      item => item.id === selectedPlaylistId
+    );
+  
+    if (!playlist) {
+      setPlaylistPickerError('Select a playlist first.');
+      return;
+    }
+  
+    setPlaylistPickerOpen(false);
+    setPlaylistSearch('');
+    setSelectedPlaylistId(null);
+    setSyncUrl(playlist.url);
+  
+    let dir = directory;
+  
+    if (!dir && storedDirectory) {
+      const granted = await verifyPermission(
+        storedDirectory,
+        true
+      );
+  
+      if (granted) {
+        dir = storedDirectory;
+        setDirectory(storedDirectory);
+      }
+    }
+  
+    if (!dir) {
+      setSyncError(
+        'Choose your audio folder first. Your selected playlist has been added to the sync URL.'
+      );
+      return;
+    }
+  
+    await analyzeAndOpenReview(
+      dir,
+      playlist.url
+    );
   }
 
   async function pickSyncFolder() {
@@ -503,7 +605,7 @@ export default function Home() {
         {job && <div className="progress"><div className="progressTrack"><div className="progressFill" style={{width:`${job.progress}%`}} /></div><div className="progressText"><span>{job.status === 'completed' ? 'Complete' : job.status === 'failed' ? 'Failed' : job.current || job.status}</span><span>{job.completed}/{job.total}</span></div>{job.status === 'completed' && job.downloadUrl && <div className="actionBar"><a className="primary" href={job.downloadUrl}>Download ZIP</a></div>}{job.error && <div className="error">{job.error}</div>}</div>}
       </section>}
 
-      <section className="card syncCard">
+      {/* <section className="card syncCard">
         <div className="syncHeader">
           <div>
             <div className="syncTitle">Playlist Sync</div>
@@ -532,7 +634,132 @@ export default function Home() {
         <div className="syncNote">
           Automatic checking runs only while this page is open, and always opens the Sync Review screen rather than downloading silently. A normal website cannot watch your YouTube account or write to an arbitrary folder in the background; the browser must grant folder access, and the sync design uses the YouTube video ID embedded in AudioDrop filenames to match tracks.
         </div>
-      </section>
+      </section> */}
+
+<section className="card syncCard">
+  <div className="syncHeader">
+    <div>
+      <div className="syncTitle">Playlist Sync</div>
+
+      <div className="syncSub">
+        Compare a playlist with your local audio folder and
+        download only songs that are missing.
+      </div>
+    </div>
+
+    <span className="badge">
+      {directory ? directory.name : 'Folder not selected'}
+    </span>
+  </div>
+
+  <div className="syncModeTitle">
+    Choose how you want to select the playlist
+  </div>
+
+  <div className="syncActions">
+    <button
+      type="button"
+      className="primary"
+      onClick={fetchMyPlaylists}
+      disabled={
+        playlistPickerLoading ||
+        syncing ||
+        !youtubeSessionId
+      }
+    >
+      {playlistPickerLoading
+        ? 'Fetching playlists…'
+        : 'Fetch my playlists'}
+    </button>
+
+    <button
+      type="button"
+      className="secondary"
+      onClick={pickSyncFolder}
+      disabled={syncing}
+    >
+      Choose audio folder
+    </button>
+  </div>
+
+  <div className="syncNote">
+    Fetch my playlists uses your temporary Google authorization
+    to show your YouTube / YouTube Music playlists. Your access
+    token is never sent to the browser.
+  </div>
+
+  <div className="syncDivider">
+    <span>OR ADD PLAYLIST LINK</span>
+  </div>
+
+  <div className="section">
+    <input
+      className="urlInput"
+      value={syncUrl}
+      onChange={e => setSyncUrl(e.target.value)}
+      placeholder="Paste YouTube / YouTube Music playlist URL"
+      inputMode="url"
+      autoCapitalize="none"
+      autoCorrect="off"
+    />
+  </div>
+
+  <div className="syncActions">
+    {!directory && storedDirectory && (
+      <button
+        type="button"
+        className="secondary"
+        onClick={reconnectFolder}
+        disabled={syncing}
+      >
+        Reconnect folder
+      </button>
+    )}
+
+    <button
+      type="button"
+      className="primary"
+      onClick={runSyncNow}
+      disabled={
+        syncing ||
+        !directory ||
+        !syncUrl.trim()
+      }
+    >
+      {syncing ? 'Checking…' : 'Sync now'}
+    </button>
+  </div>
+
+  <div className="syncActions">
+    <button
+      type="button"
+      className="secondary"
+      onClick={() =>
+        setWatchEnabled(v => !v)
+      }
+      disabled={
+        !directory ||
+        !syncUrl.trim()
+      }
+    >
+      {watchEnabled
+        ? 'Stop automatic checking'
+        : 'Check for new songs automatically'}
+    </button>
+  </div>
+
+  {syncError && (
+    <div className="error">
+      {syncError}
+    </div>
+  )}
+
+  <div className="syncNote">
+    Automatic checking runs only while this page is open,
+    and always opens the Sync Review screen rather than
+    downloading silently.
+  </div>
+</section>
 
       {syncHistory.length > 0 && (
         <section className="card section">
@@ -552,6 +779,171 @@ export default function Home() {
           </div>
         </section>
       )}
+
+{playlistPickerOpen && (
+  <div
+    className="modalOverlay"
+    role="dialog"
+    aria-modal="true"
+  >
+    <div className="modalCard playlistPickerCard">
+
+      <div className="modalHeader">
+        <div>
+          <div className="modalTitle">
+            Your YouTube Playlists
+          </div>
+
+          <div className="modalSub">
+            {youtubePlaylists.length} playlist
+            {youtubePlaylists.length === 1 ? '' : 's'} found
+          </div>
+        </div>
+
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => {
+            setPlaylistPickerOpen(false);
+            setSelectedPlaylistId(null);
+            setPlaylistSearch('');
+          }}
+        >
+          Close
+        </button>
+      </div>
+
+      <div className="section">
+        <input
+          className="urlInput"
+          value={playlistSearch}
+          onChange={e =>
+            setPlaylistSearch(e.target.value)
+          }
+          placeholder="Search your playlists…"
+          autoCapitalize="off"
+          autoCorrect="off"
+        />
+      </div>
+
+      {playlistPickerError && (
+        <div className="error">
+          {playlistPickerError}
+        </div>
+      )}
+
+      <div className="playlistPickerList">
+        {youtubePlaylists
+          .filter(playlist =>
+            playlist.title
+              .toLowerCase()
+              .includes(
+                playlistSearch
+                  .trim()
+                  .toLowerCase()
+              )
+          )
+          .map(playlist => {
+            const selected =
+              selectedPlaylistId === playlist.id;
+
+            return (
+              <button
+                type="button"
+                key={playlist.id}
+                className={`playlistPickerItem ${
+                  selected
+                    ? 'playlistPickerItemSelected'
+                    : ''
+                }`}
+                onClick={() =>
+                  setSelectedPlaylistId(
+                    playlist.id
+                  )
+                }
+              >
+                {playlist.thumbnail ? (
+                  <img
+                    className="playlistPickerThumb"
+                    src={playlist.thumbnail}
+                    alt=""
+                  />
+                ) : (
+                  <div className="playlistPickerThumb" />
+                )}
+
+                <span className="playlistPickerBody">
+                  <span className="playlistPickerTitle">
+                    {playlist.title}
+                  </span>
+
+                  <span className="playlistPickerMeta">
+                    {playlist.trackCount} track
+                    {playlist.trackCount === 1
+                      ? ''
+                      : 's'}
+                    {playlist.privacyStatus
+                      ? ` · ${playlist.privacyStatus}`
+                      : ''}
+                  </span>
+                </span>
+
+                {selected && (
+                  <span className="playlistPickerCheck">
+                    ✓
+                  </span>
+                )}
+              </button>
+            );
+          })}
+
+        {youtubePlaylists.length > 0 &&
+          youtubePlaylists.filter(playlist =>
+            playlist.title
+              .toLowerCase()
+              .includes(
+                playlistSearch
+                  .trim()
+                  .toLowerCase()
+              )
+          ).length === 0 && (
+            <div className="notice">
+              No playlists match your search.
+            </div>
+          )}
+
+        {youtubePlaylists.length === 0 && (
+          <div className="notice">
+            No playlists were found on this YouTube account.
+          </div>
+        )}
+      </div>
+
+      <div className="actionBar">
+        <button
+          type="button"
+          className="secondary"
+          onClick={fetchMyPlaylists}
+          disabled={playlistPickerLoading}
+        >
+          {playlistPickerLoading
+            ? 'Refreshing…'
+            : 'Refresh'}
+        </button>
+
+        <button
+          type="button"
+          className="primary"
+          onClick={syncSelectedPlaylist}
+          disabled={!selectedPlaylistId}
+        >
+          Sync selected playlist
+        </button>
+      </div>
+
+    </div>
+  </div>
+)}
 
       {reviewOpen && reviewData && (
         <div className="modalOverlay" role="dialog" aria-modal="true">

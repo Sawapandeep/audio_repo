@@ -179,9 +179,64 @@ def _youtube_api_get(path, params, access_token):
         raise RuntimeError(f'YouTube API error ({exc.code}): {message}') from exc
 
 
+# def youtube_playlist(url, auth):
+#     if not auth:
+#         raise RuntimeError('Google YouTube authorization is required for private playlist access.')
+#     access_token = str(auth.get('accessToken') or '')
+#     if not access_token:
+#         raise RuntimeError('The Google YouTube OAuth token is incomplete. Connect YouTube again.')
+
+#     playlist_id = extract_playlist_id(url)
+#     formats = available_output_formats()
+
+#     meta = _youtube_api_get('playlists', {'part': 'snippet', 'id': playlist_id}, access_token)
+#     items_meta = meta.get('items') or []
+#     playlist_title = (items_meta[0]['snippet']['title'] if items_meta and items_meta[0].get('snippet') else 'Playlist')
+#     playlist_thumb = None
+#     if items_meta and items_meta[0].get('snippet', {}).get('thumbnails'):
+#         thumbs = items_meta[0]['snippet']['thumbnails']
+#         playlist_thumb = (thumbs.get('medium') or thumbs.get('default') or {}).get('url')
+
+#     tracks = []
+#     page_token = None
+#     idx = 0
+#     while True:
+#         params = {'part': 'snippet,contentDetails', 'playlistId': playlist_id, 'maxResults': 50}
+#         if page_token:
+#             params['pageToken'] = page_token
+#         page = _youtube_api_get('playlistItems', params, access_token)
+#         for item in page.get('items') or []:
+#             snippet = item.get('snippet') or {}
+#             content = item.get('contentDetails') or {}
+#             video_id = content.get('videoId') or (snippet.get('resourceId') or {}).get('videoId')
+#             if not video_id or snippet.get('title') in ('Deleted video', 'Private video'):
+#                 continue
+#             idx += 1
+#             thumbs = snippet.get('thumbnails') or {}
+#             thumb = (thumbs.get('medium') or thumbs.get('default') or {}).get('url') if thumbs else None
+#             tracks.append({
+#                 'id': str(video_id),
+#                 'title': snippet.get('title') or f'Track {idx}',
+#                 'uploader': snippet.get('videoOwnerChannelTitle') or snippet.get('channelTitle'),
+#                 'duration': None,
+#                 'url': f'https://www.youtube.com/watch?v={video_id}',
+#                 'index': idx,
+#                 'thumbnail': thumb,
+#             })
+#         page_token = page.get('nextPageToken')
+#         if not page_token:
+#             break
+
+#     return {
+#         'type': 'playlist', 'title': playlist_title, 'thumbnail': playlist_thumb,
+#         'uploader': None, 'duration': None, 'url': url,
+#         'formats': [], 'sourceBitrates': [], 'outputFormats': formats, 'tracks': tracks,
+#     }
+
 def youtube_playlist(url, auth):
     if not auth:
         raise RuntimeError('Google YouTube authorization is required for private playlist access.')
+
     access_token = str(auth.get('accessToken') or '')
     if not access_token:
         raise RuntimeError('The Google YouTube OAuth token is incomplete. Connect YouTube again.')
@@ -189,49 +244,116 @@ def youtube_playlist(url, auth):
     playlist_id = extract_playlist_id(url)
     formats = available_output_formats()
 
-    meta = _youtube_api_get('playlists', {'part': 'snippet', 'id': playlist_id}, access_token)
+    meta = _youtube_api_get(
+        'playlists',
+        {'part': 'snippet', 'id': playlist_id},
+        access_token
+    )
+
     items_meta = meta.get('items') or []
-    playlist_title = (items_meta[0]['snippet']['title'] if items_meta and items_meta[0].get('snippet') else 'Playlist')
+
+    playlist_title = (
+        items_meta[0]['snippet']['title']
+        if items_meta and items_meta[0].get('snippet')
+        else 'Playlist'
+    )
+
     playlist_thumb = None
+
     if items_meta and items_meta[0].get('snippet', {}).get('thumbnails'):
         thumbs = items_meta[0]['snippet']['thumbnails']
-        playlist_thumb = (thumbs.get('medium') or thumbs.get('default') or {}).get('url')
+
+        playlist_thumb = (
+            thumbs.get('medium')
+            or thumbs.get('default')
+            or {}
+        ).get('url')
 
     tracks = []
     page_token = None
     idx = 0
+
     while True:
-        params = {'part': 'snippet,contentDetails', 'playlistId': playlist_id, 'maxResults': 50}
+        params = {
+            'part': 'snippet,contentDetails',
+            'playlistId': playlist_id,
+            'maxResults': 50
+        }
+
         if page_token:
             params['pageToken'] = page_token
-        page = _youtube_api_get('playlistItems', params, access_token)
+
+        page = _youtube_api_get(
+            'playlistItems',
+            params,
+            access_token
+        )
+
         for item in page.get('items') or []:
             snippet = item.get('snippet') or {}
             content = item.get('contentDetails') or {}
-            video_id = content.get('videoId') or (snippet.get('resourceId') or {}).get('videoId')
-            if not video_id or snippet.get('title') in ('Deleted video', 'Private video'):
+
+            video_id = (
+                content.get('videoId')
+                or (snippet.get('resourceId') or {}).get('videoId')
+            )
+
+            if not video_id:
                 continue
+
+            if snippet.get('title') in ('Deleted video', 'Private video'):
+                continue
+
             idx += 1
+
             thumbs = snippet.get('thumbnails') or {}
-            thumb = (thumbs.get('medium') or thumbs.get('default') or {}).get('url') if thumbs else None
+
+            thumb = (
+                (
+                    thumbs.get('medium')
+                    or thumbs.get('default')
+                    or {}
+                ).get('url')
+                if thumbs
+                else None
+            )
+
             tracks.append({
                 'id': str(video_id),
                 'title': snippet.get('title') or f'Track {idx}',
-                'uploader': snippet.get('videoOwnerChannelTitle') or snippet.get('channelTitle'),
+                'uploader': (
+                    snippet.get('videoOwnerChannelTitle')
+                    or snippet.get('channelTitle')
+                ),
                 'duration': None,
                 'url': f'https://www.youtube.com/watch?v={video_id}',
                 'index': idx,
                 'thumbnail': thumb,
             })
+
         page_token = page.get('nextPageToken')
+
         if not page_token:
             break
 
     return {
-        'type': 'playlist', 'title': playlist_title, 'thumbnail': playlist_thumb,
-        'uploader': None, 'duration': None, 'url': url,
-        'formats': [], 'sourceBitrates': [], 'outputFormats': formats, 'tracks': tracks,
+        'type': 'playlist',
+        'title': playlist_title,
+        'thumbnail': playlist_thumb,
+        'uploader': None,
+        'duration': None,
+        'url': url,
+        'formats': [],
+        'sourceBitrates': [],
+        'outputFormats': formats,
+        'tracks': tracks,
     }
+
+
+# Compatibility alias used by /api/sync
+# and by the Python action dispatcher.
+def ytmusic_playlist(url, auth):
+    return youtube_playlist(url, auth)
 
 def youtube_playlists(auth):
     if not auth:
@@ -400,6 +522,17 @@ def download_playlist(payload):
         if p.is_file() and p != zip_path: p.unlink(missing_ok=True)
     print(json.dumps({'type':'result','filePath':str(zip_path)}), flush=True)
 
+
+# def main():
+#     payload=json.loads(sys.stdin.read())
+#     action=payload.get('action')
+#     # if action=='ytmusic_playlist': result=ytmusic_playlist(payload['url'], payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
+#     if action=='analyze': result=analyze(payload['url'], payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
+#     if action=='download_single': result=download_single(payload['url'],payload.get('format','mp3'),int(payload.get('quality') or 192),bool(payload.get('includeId')), payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
+#     if action=='download_playlist': download_playlist(payload); return
+    
+#     raise ValueError('Unknown action.')
+
 def main():
     payload=json.loads(sys.stdin.read())
     action=payload.get('action')
@@ -443,16 +576,6 @@ def main():
         return
 
     raise ValueError('Unknown action.')
-
-# def main():
-#     payload=json.loads(sys.stdin.read())
-#     action=payload.get('action')
-#     # if action=='ytmusic_playlist': result=ytmusic_playlist(payload['url'], payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
-#     if action=='analyze': result=analyze(payload['url'], payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
-#     if action=='download_single': result=download_single(payload['url'],payload.get('format','mp3'),int(payload.get('quality') or 192),bool(payload.get('includeId')), payload.get('youtubeAuth')); print(json.dumps(result), flush=True); return
-#     if action=='download_playlist': download_playlist(payload); return
-    
-#     raise ValueError('Unknown action.')
 
 try:
     main()

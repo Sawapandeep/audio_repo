@@ -119,3 +119,128 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 @media (max-width:560px) {
   .youtubeConnected { align-items:stretch; flex-direction:column; }
 }
+
+.syncModeTitle {
+  margin-top: 16px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.syncDivider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.syncDivider::before,
+.syncDivider::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: var(--line);
+}
+
+.playlistPickerCard {
+  width: min(100%, 680px);
+}
+
+.playlistPickerList {
+  margin-top: 14px;
+  max-height: 55vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.playlistPickerItem {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.playlistPickerItem:last-child {
+  border-bottom: 0;
+}
+
+.playlistPickerItem:hover {
+  background: rgba(255,255,255,.035);
+}
+
+.playlistPickerItemSelected {
+  background: rgba(217,255,74,.07);
+}
+
+.playlistPickerThumb {
+  width: 72px;
+  height: 48px;
+  flex: 0 0 72px;
+  object-fit: cover;
+  border-radius: 9px;
+  background: #0b0e14;
+  border: 1px solid var(--line);
+}
+
+.playlistPickerBody {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.playlistPickerTitle {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playlistPickerMeta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.playlistPickerCheck {
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 900;
+}
+
+@media (max-width: 560px) {
+  .playlistPickerCard {
+    width: 100%;
+  }
+
+  .playlistPickerThumb {
+    width: 60px;
+    height: 42px;
+    flex-basis: 60px;
+  }
+
+  .playlistPickerTitle {
+    white-space: normal;
+  }
+}
