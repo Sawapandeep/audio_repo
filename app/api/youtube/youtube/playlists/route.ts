@@ -12,9 +12,9 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   try {
     const cookieJar = await cookies();
-    const sessionId = cookieJar.get(
-      'audiodrop_youtube_session'
-    )?.value;
+
+    const sessionId =
+      cookieJar.get('audiodrop_youtube_session')?.value;
 
     if (!sessionId) {
       throw new Error(
