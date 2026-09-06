@@ -244,3 +244,81 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     white-space: normal;
   }
 }
+/* Playlist picker: card grid (replaces the old row-list style below,
+   which can be deleted if you're not using it elsewhere) */
+   .playlistCardGrid {
+    margin-top: 14px;
+    max-height: 55vh;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 10px;
+    padding: 2px;
+  }
+  
+  .playlistCard {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: #0b0e14;
+    color: var(--text);
+    text-align: left;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  
+  .playlistCard:hover:not(:disabled) {
+    background: rgba(255,255,255,.035);
+    border-color: #566078;
+  }
+  
+  .playlistCard:disabled {
+    cursor: not-allowed;
+    opacity: .6;
+  }
+  
+  .playlistCardThumb {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    border-radius: 10px;
+    background: #05070b;
+    border: 1px solid var(--line);
+  }
+  
+  .playlistCardTitle {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  
+  .playlistCardMeta {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  
+  .playlistCardBusy {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(8,10,15,.82);
+    border-radius: 14px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  
+  @media (max-width: 560px) {
+    .playlistCardGrid {
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    }
+  }
