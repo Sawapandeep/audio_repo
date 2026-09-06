@@ -5,12 +5,18 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: Request) {
+  // const url = new URL(request.url);
   const url = new URL(request.url);
+
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
   const error = url.searchParams.get('error');
   const cookieState = request.headers.get('cookie')?.match(/(?:^|;\s*)audiodrop_oauth_state=([^;]+)/)?.[1];
-  const origin = url.origin;
+  // const origin = url.origin;
+  const origin =
+  process.env.NEXT_PUBLIC_APP_URL ||
+  process.env.APP_URL ||
+  url.origin;
 
   function redirectHome(params: Record<string, string>) {
     const target = new URL('/', origin);
