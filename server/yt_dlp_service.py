@@ -81,6 +81,23 @@ def apply_youtube_auth(opts, auth):
         opts['http_headers'] = {'User-Agent': str(user_agent)[:512]}
     return opts
 
+def should_retry_youtube_with_android(error):
+    message = str(error).lower()
+
+    retry_markers = (
+        'sign in to confirm you\'re not a bot',
+        'confirm you\'re not a bot',
+        'confirm you are not a bot',
+        'http error 403',
+        'forbidden',
+        'po token',
+        'proof of origin',
+        'botguard',
+        'video unavailable',
+    )
+
+    return any(marker in message for marker in retry_markers)
+
 
 def source_formats(info):
     result=[]; bitrates=set()
@@ -416,10 +433,7 @@ def youtube_playlists(auth):
                 'trackCount': int(content.get('itemCount') or 0),
                 'privacyStatus': status.get('privacyStatus') or 'unknown',
                 'publishedAt': snippet.get('publishedAt'),
-                'url': (
-                    f'https://www.youtube.com/playlist'
-                    f'?list={playlist_id}'
-                ),
+                'url': f'https://www.youtube.com/playlist?list={playlist_id}',
             })
 
         page_token = page.get('nextPageToken')
@@ -443,22 +457,59 @@ def progress_hook_factory(total, emit):
     return hook
 
 
-def download_opts(output_dir, ext, quality, hook=None):
-    validate_format(ext); ffmpeg_ok()
-    if quality not in BITRATES: quality=192
-    # yt-dlp receives a fixed, safe argument structure. No user-controlled shell command is constructed.
-    post = {'key':'FFmpegExtractAudio','preferredcodec':ext}
-    if ALLOWED_FORMATS[ext][1]: post['preferredquality']=str(quality)
-    return base_opts() | {
-        'format':'bestaudio/best',
+# def download_opts(output_dir, ext, quality, hook=None):
+#     validate_format(ext); ffmpeg_ok()
+#     if quality not in BITRATES: quality=192
+#     # yt-dlp receives a fixed, safe argument structure. No user-controlled shell command is constructed.
+#     post = {'key':'FFmpegExtractAudio','preferredcodec':ext}
+#     if ALLOWED_FORMATS[ext][1]: post['preferredquality']=str(quality)
+#     return base_opts() | {
+#         'format':'bestaudio/best',
+#         'outtmpl': str(Path(output_dir) / '%(title).180B [%(id)s].%(ext)s'),
+#         'noplaylist': True,
+#         'postprocessors':[post],
+#         'progress_hooks':[hook] if hook else [],
+#         'restrictfilenames': False,
+#         'windowsfilenames': True,
+#     }
+
+def download_opts(output_dir, ext, quality, hook=None, youtube_player_client=None):
+    validate_format(ext)
+    ffmpeg_ok()
+
+    if quality not in BITRATES:
+        quality = 192
+
+    # yt-dlp receives a fixed, safe argument structure.
+    # No user-controlled shell command is constructed.
+    post = {
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': ext,
+    }
+
+    if ALLOWED_FORMATS[ext][1]:
+        post['preferredquality'] = str(quality)
+
+    opts = base_opts() | {
+        'format': 'bestaudio/best',
         'outtmpl': str(Path(output_dir) / '%(title).180B [%(id)s].%(ext)s'),
         'noplaylist': True,
-        'postprocessors':[post],
-        'progress_hooks':[hook] if hook else [],
+        'postprocessors': [post],
+        'progress_hooks': [hook] if hook else [],
         'restrictfilenames': False,
         'windowsfilenames': True,
     }
 
+    # Optional YouTube player-client override.
+    # Keep this off for the normal attempt; use it only for fallback.
+    if youtube_player_client:
+        opts['extractor_args'] = {
+            'youtube': {
+                'player_client': [youtube_player_client],
+            }
+        }
+
+    return opts
 
 def download_single(url, ext, quality, include_id=False, auth=None):
     temp=tempfile.mkdtemp(prefix='audiodrop-')
@@ -482,45 +533,236 @@ def download_single(url, ext, quality, include_id=False, auth=None):
 
 
 def download_playlist(payload):
-    output_dir=Path(payload['outputDir']); output_dir.mkdir(parents=True,exist_ok=True)
-    ext=payload['format']; quality=int(payload.get('quality') or 192)
-    tracks=payload.get('tracks') or []
-    auth=payload.get('youtubeAuth')
-    entries=[]
+    output_dir = Path(payload['outputDir'])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = payload['format']
+    quality = int(payload.get('quality') or 192)
+
+    tracks = payload.get('tracks') or []
+    auth = payload.get('youtubeAuth')
+
+    entries = []
+
     for track in tracks:
         if not isinstance(track, dict):
             continue
-        u=track.get('url')
+
+        u = track.get('url')
+
         if not u:
             continue
+
         entries.append({
             'id': str(track.get('id') or ''),
             'title': track.get('title') or 'Track',
             'webpage_url': u,
         })
-    if not entries: raise RuntimeError('None of the selected playlist tracks could be resolved.')
-    done=0; total=len(entries)
+
+    if not entries:
+        raise RuntimeError(
+            'None of the selected playlist tracks could be resolved.'
+        )
+
+    done = 0
+    total = len(entries)
+
     def emit(msg):
-        msg['completed']=done; msg['total']=total; print(json.dumps(msg), flush=True)
+        msg['completed'] = done
+        msg['total'] = total
+        print(json.dumps(msg), flush=True)
+
     for entry in entries:
-        u=entry_url(entry)
-        if not u: continue
-        hook=progress_hook_factory(total, emit)
-        opts=apply_youtube_auth(download_opts(str(output_dir), ext, quality, hook), auth)
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.extract_info(u, download=True)
+        u = entry_url(entry)
+
+        if not u:
+            continue
+
+        hook = progress_hook_factory(total, emit)
+
+        try:
+            # -----------------------------------------------------
+            # Attempt 1: normal yt-dlp configuration
+            # -----------------------------------------------------
+            opts = apply_youtube_auth(
+                download_opts(
+                    str(output_dir),
+                    ext,
+                    quality,
+                    hook,
+                ),
+                auth,
+            )
+
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.extract_info(u, download=True)
+
+        except yt_dlp.utils.DownloadError as first_error:
+            # -----------------------------------------------------
+            # Attempt 2: explicit Android player client
+            # -----------------------------------------------------
+            if not should_retry_youtube_with_android(first_error):
+                raise
+
+            print(
+                json.dumps({
+                    'type': 'youtube_fallback',
+                    'client': 'android',
+                    'track': entry.get('title') or 'Track',
+                    'reason': str(first_error)[:500],
+                }),
+                flush=True,
+            )
+
+            opts = apply_youtube_auth(
+                download_opts(
+                    str(output_dir),
+                    ext,
+                    quality,
+                    hook,
+                    youtube_player_client='android',
+                ),
+                auth,
+            )
+
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.extract_info(u, download=True)
+
         done += 1
-        emit({'type':'progress','completed':done,'total':total,'current':entry.get('title') or 'Track'})
-    zip_path=output_dir / 'audio.zip'
-    with zipfile.ZipFile(zip_path,'w',zipfile.ZIP_DEFLATED) as z:
+
+        emit({
+            'type': 'progress',
+            'completed': done,
+            'total': total,
+            'current': entry.get('title') or 'Track',
+        })
+
+    zip_path = output_dir / 'audio.zip'
+
+    with zipfile.ZipFile(
+        zip_path,
+        'w',
+        zipfile.ZIP_DEFLATED,
+    ) as z:
         for p in output_dir.iterdir():
             if p.is_file() and p != zip_path:
-                safe=clean_name(p.stem)+p.suffix
+                safe = clean_name(p.stem) + p.suffix
                 z.write(p, arcname=safe)
+
     # Cleanup individual files after archive creation.
     for p in output_dir.iterdir():
-        if p.is_file() and p != zip_path: p.unlink(missing_ok=True)
-    print(json.dumps({'type':'result','filePath':str(zip_path)}), flush=True)
+        if p.is_file() and p != zip_path:
+            p.unlink(missing_ok=True)
+
+    print(
+        json.dumps({
+            'type': 'result',
+            'filePath': str(zip_path),
+        }),
+        flush=True,
+    )
+
+# def download_playlist(payload):
+#     output_dir=Path(payload['outputDir']); output_dir.mkdir(parents=True,exist_ok=True)
+#     ext=payload['format']; quality=int(payload.get('quality') or 192)
+#     tracks=payload.get('tracks') or []
+#     auth=payload.get('youtubeAuth')
+#     entries=[]
+#     for track in tracks:
+#         if not isinstance(track, dict):
+#             continue
+#         u=track.get('url')
+#         if not u:
+#             continue
+#         entries.append({
+#             'id': str(track.get('id') or ''),
+#             'title': track.get('title') or 'Track',
+#             'webpage_url': u,
+#         })
+#     if not entries: raise RuntimeError('None of the selected playlist tracks could be resolved.')
+#     done=0; total=len(entries)
+#     def emit(msg):
+#         msg['completed']=done; msg['total']=total; print(json.dumps(msg), flush=True)
+#     # for entry in entries:
+#     #     u=entry_url(entry)
+#     #     if not u: continue
+#     #     hook=progress_hook_factory(total, emit)
+#     #     opts=apply_youtube_auth(download_opts(str(output_dir), ext, quality, hook), auth)
+#     #     with yt_dlp.YoutubeDL(opts) as ydl:
+#     #         ydl.extract_info(u, download=True)
+#     #     done += 1
+#     #     emit({'type':'progress','completed':done,'total':total,'current':entry.get('title') or 'Track'})
+#     #
+#         for entry in entries:
+#             u = entry_url(entry)
+#             if not u:continue
+#             hook = progress_hook_factory(total, emit)
+#             try:              # ---------------------------------------------------------
+#               # Attempt 1: normal yt-dlp configuration
+#               # ---------------------------------------------------------
+#               opts = apply_youtube_auth(
+#                   download_opts(
+#                       str(output_dir),
+#                       ext,
+#                       quality,
+#                       hook,
+#                   ),
+#                   auth,
+#               )
+
+#               with yt_dlp.YoutubeDL(opts) as ydl:
+#             ydl.extract_info(u, download=True)
+
+#     except yt_dlp.utils.DownloadError as first_error:
+
+#         # ---------------------------------------------------------
+#         # Attempt 2: explicit Android player client
+#         # ---------------------------------------------------------
+#         if not should_retry_youtube_with_android(first_error):
+#             raise
+
+#         print(
+#             json.dumps({
+#                 'type': 'youtube_fallback',
+#                 'client': 'android',
+#                 'track': entry.get('title') or 'Track',
+#                 'reason': str(first_error)[:500],
+#             }),
+#             flush=True,
+#         )
+
+#         opts = apply_youtube_auth(
+#             download_opts(
+#                 str(output_dir),
+#                 ext,
+#                 quality,
+#                 hook,
+#                 youtube_player_client='android',
+#             ),
+#             auth,
+#         )
+
+#         with yt_dlp.YoutubeDL(opts) as ydl:
+#             ydl.extract_info(u, download=True)
+
+#     done += 1
+
+#     emit({
+#         'type': 'progress',
+#         'completed': done,
+#         'total': total,
+#         'current': entry.get('title') or 'Track',
+#     })
+#          zip_path=output_dir / 'audio.zip'
+#     with zipfile.ZipFile(zip_path,'w',zipfile.ZIP_DEFLATED) as z:
+#         for p in output_dir.iterdir():
+#             if p.is_file() and p != zip_path:
+#                 safe=clean_name(p.stem)+p.suffix
+#                 z.write(p, arcname=safe)
+#     # Cleanup individual files after archive creation.
+#     for p in output_dir.iterdir():
+#         if p.is_file() and p != zip_path: p.unlink(missing_ok=True)
+#     print(json.dumps({'type':'result','filePath':str(zip_path)}), flush=True)
 
 
 # def main():
