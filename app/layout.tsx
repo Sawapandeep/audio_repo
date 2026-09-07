@@ -2,9 +2,15 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'AudioDrop — yt-dlp Audio Downloader',
+  title: 'AudioDrop',
   description: 'A mobile-first audio downloader powered by yt-dlp.',
   applicationName: 'AudioDrop',
+
+  icons: {
+    icon: '/icons/audiodrop.svg',
+    shortcut: '/icons/audiodrop.svg',
+    apple: '/icons/audiodrop.svg',
+  },
 };
 
 export const viewport: Viewport = {
@@ -14,7 +20,11 @@ export const viewport: Viewport = {
   viewportFit: 'cover',
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
   return (
     <html lang="en">
       <body>{children}</body>

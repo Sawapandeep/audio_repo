@@ -561,7 +561,11 @@ const [reviewTargetDir, setReviewTargetDir] = useState<DirectoryHandle | null>(n
 
   return (
     <main className="shell">
-      <header className="header"><div className="brand"><div className="logo">A</div><span>AudioDrop</span></div><span className="badge">yt-dlp powered</span></header>
+      <header className="header"><div className="brand"><img
+  src="icons/audiodrop.svg"
+  alt="AudioDrop"
+  className="logo"
+/><span>AudioDrop</span></div><span className="badge">yt-dlp powered</span></header>
       <section className="hero">
         <h1>Turn YouTube links into audio.</h1>
         <p>Paste a YouTube or YouTube Music link. Analyze it first, choose a real output format and quality, then download.</p>
