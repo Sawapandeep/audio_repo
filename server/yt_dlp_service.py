@@ -512,25 +512,91 @@ def download_opts(output_dir, ext, quality, hook=None, youtube_player_client=Non
     return opts
 
 def download_single(url, ext, quality, include_id=False, auth=None):
-    temp=tempfile.mkdtemp(prefix='audiodrop-')
+    temp = tempfile.mkdtemp(prefix='audiodrop-')
+
     try:
-        opts=apply_youtube_auth(download_opts(temp, ext, quality), auth)
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info=ydl.extract_info(url, download=True)
-        files=[p for p in Path(temp).iterdir() if p.is_file() and p.suffix.lower().lstrip('.') == ext]
-        if not files: raise RuntimeError('yt-dlp completed but no converted audio file was produced.')
-        file=files[0]
-        filename=clean_name(info.get('title') or 'audio')
+        # ---------------------------------------------------------
+        # Attempt 1: normal yt-dlp extraction
+        # ---------------------------------------------------------
+        try:
+            opts = apply_youtube_auth(
+                download_opts(
+                    temp,
+                    ext,
+                    quality,
+                ),
+                auth,
+            )
+
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+
+        except yt_dlp.utils.DownloadError as first_error:
+
+            # -----------------------------------------------------
+            # Attempt 2: Android YouTube client
+            # Only retry for bot / 403 / PO-token type failures.
+            # -----------------------------------------------------
+            if not should_retry_youtube_with_android(first_error):
+                raise
+
+            print(
+                json.dumps({
+                    'type': 'youtube_fallback',
+                    'client': 'android',
+                    'reason': str(first_error)[:500],
+                }),
+                flush=True,
+            )
+
+            opts = apply_youtube_auth(
+                download_opts(
+                    temp,
+                    ext,
+                    quality,
+                    youtube_player_client='android',
+                ),
+                auth,
+            )
+
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+
+        # ---------------------------------------------------------
+        # Find generated audio file
+        # ---------------------------------------------------------
+        files = [
+            p for p in Path(temp).iterdir()
+            if p.is_file()
+        ]
+
+        if not files:
+            raise RuntimeError(
+                'yt-dlp completed but no output file was created.'
+            )
+
+        output_file = files[0]
+
+        # ---------------------------------------------------------
+        # Return result
+        # ---------------------------------------------------------
+        result = {
+            'type': 'result',
+            'filePath': str(output_file),
+            'title': info.get('title') or 'Audio',
+        }
+
         if include_id:
-            video_id=clean_name(str(info.get('id') or 'unknown'))
-            filename=f'{filename} [{video_id}].{ext}'
-        else:
-            filename=f'{filename}.{ext}'
-        return {'filePath':str(file),'filename':filename,'mime':ALLOWED_FORMATS[ext][0]}
+            result['id'] = info.get('id')
+
+        print(
+            json.dumps(result),
+            flush=True,
+        )
+
     except Exception:
         shutil.rmtree(temp, ignore_errors=True)
         raise
-
 
 def download_playlist(payload):
     output_dir = Path(payload['outputDir'])
