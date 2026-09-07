@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import type { DirectoryHandle } from '@/app/lib/fsTypes';
 import { loadDirectoryHandle, saveDirectoryHandle } from '@/app/lib/directoryStore';
 import {
@@ -159,6 +159,7 @@ export default function Home() {
   const [youtubeSessionId, setYoutubeSessionId] = useState<string | null>(null);
   const [youtubeSessionExpiresAt, setYoutubeSessionExpiresAt] = useState<string | null>(null);
   const [youtubeSessionBusy, setYoutubeSessionBusy] = useState(false);
+  const youtubeCookieInputRef = useRef<HTMLInputElement | null>(null);
   const [playlistPickerOpen, setPlaylistPickerOpen] = useState(false);
 const [playlistPickerLoading, setPlaylistPickerLoading] = useState(false);
 const [playlistPickerError, setPlaylistPickerError] = useState('');
@@ -228,6 +229,25 @@ const [reviewTargetDir, setReviewTargetDir] = useState<DirectoryHandle | null>(n
       setYoutubeSessionId(null);
       setYoutubeSessionExpiresAt(null);
       setYoutubeSessionBusy(false);
+    }
+  }
+
+  async function connectYouTubeWithCookies(file: File) {
+    setYoutubeSessionBusy(true);
+    setError('');
+    try {
+      const form = new FormData();
+      form.set('cookies', file);
+      const res = await fetch('/api/youtube/session', { method: 'POST', body: form, cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Unable to use this cookies.txt file.');
+      setYoutubeSessionId('cookie');
+      setYoutubeSessionExpiresAt(data.expiresAt);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to use this cookies.txt file.');
+    } finally {
+      setYoutubeSessionBusy(false);
+      if (youtubeCookieInputRef.current) youtubeCookieInputRef.current.value = '';
     }
   }
 
@@ -591,6 +611,33 @@ const [reviewTargetDir, setReviewTargetDir] = useState<DirectoryHandle | null>(n
             </div>
           </>
         )}
+
+        <div className="syncNote" style={{ marginTop: 12 }}>
+          Downloads blocked with a &quot;Sign in to confirm you&apos;re not a bot&quot; error? Google Sign-In alone doesn&apos;t satisfy that check — it needs a real browser cookie file instead.
+        </div>
+        <input
+          ref={youtubeCookieInputRef}
+          type="file"
+          accept=".txt,text/plain"
+          hidden
+          onChange={e => {
+            const file = e.target.files?.[0];
+            if (file) void connectYouTubeWithCookies(file);
+          }}
+        />
+        <div className="syncActions">
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => youtubeCookieInputRef.current?.click()}
+            disabled={youtubeSessionBusy || loading || syncing || downloadingReview}
+          >
+            {youtubeSessionBusy ? 'Connecting…' : 'Upload cookies.txt instead'}
+          </button>
+        </div>
+        <div className="syncNote">
+          Export a fresh cookies.txt (Mozilla/Netscape format) from your own logged-in YouTube session, then select it here. This replaces your current Google connection for this session — reconnect with Google afterward if you need to fetch playlists again.
+        </div>
       </section>
 
       {analysis && <section className="card section">

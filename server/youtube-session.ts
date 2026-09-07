@@ -1,10 +1,16 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 const DEFAULT_TTL_SECONDS = 15 * 60;
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 export const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube';
+
+const MAX_COOKIE_BYTES = 2 * 1024 * 1024;
+const COOKIE_SESSION_TTL_MS = DEFAULT_TTL_SECONDS * 1000;
 
 export type GoogleTokenResponse = {
   access_token: string;
@@ -22,12 +28,19 @@ type YouTubeOAuthToken = {
   tokenType: string;
 };
 
-export type YouTubeSession = {
-  id: string;
-  token: YouTubeOAuthToken;
-  createdAt: number;
-  expiresAt: number;
-};
+// Two kinds of session can now back "Temporary YouTube access":
+//  - 'oauth'   — Google Sign-In. Good for listing/reading playlists via the
+//                YouTube Data API. NOT sufficient on its own for the actual
+//                yt-dlp stream download — YouTube's bot-check on that path
+//                checks for a real browser cookie jar, which an OAuth access
+//                token cannot substitute for.
+//  - 'cookies' — a cookies.txt exported from a real, logged-in browser
+//                session. This is what actually satisfies yt-dlp's download-time
+//                bot-check. Used as a fallback when downloads fail under
+//                OAuth-only auth.
+export type YouTubeSession =
+  | { id: string; kind: 'oauth'; token: YouTubeOAuthToken; createdAt: number; expiresAt: number }
+  | { id: string; kind: 'cookies'; cookiesPath: string; createdAt: number; expiresAt: number };
 
 // This is intentionally process-local. AudioDrop is currently a personal,
 // single-service deployment on Render. A database/Redis session store is not
@@ -114,6 +127,7 @@ function createSessionFromToken(data: GoogleTokenResponse): YouTubeSession {
 
   const session: YouTubeSession = {
     id: crypto.randomUUID(),
+    kind: 'oauth',
     token,
     createdAt,
     expiresAt,
@@ -143,7 +157,52 @@ export async function completeYouTubeOAuthWebFlow(code: string) {
   };
 }
 
-async function refresh(session: YouTubeSession) {
+function assertCookieFile(content: Buffer) {
+  if (content.length === 0) throw new Error('The cookies file is empty.');
+  if (content.length > MAX_COOKIE_BYTES) throw new Error('The cookies file is too large.');
+  const text = content.toString('utf8').replace(/^\uFEFF/, '');
+  const firstLine = text.split(/\r?\n/, 1)[0].trim();
+  if (firstLine !== '# HTTP Cookie File' && firstLine !== '# Netscape HTTP Cookie File') {
+    throw new Error('Unsupported cookies file. Export a Mozilla/Netscape cookies.txt file.');
+  }
+  if (!/\byoutube\.com\b/i.test(text) && !/\bytimg\.com\b/i.test(text)) {
+    throw new Error('The cookies file does not appear to contain YouTube cookies.');
+  }
+}
+
+// Fallback path for when OAuth alone isn't enough to satisfy yt-dlp's
+// download-time bot-check. The cookies file is written once to a private
+// temp file and referenced by path only — never sent to, or stored by, the
+// browser.
+export async function createYouTubeSessionFromCookies(cookieBytes: Buffer) {
+  assertCookieFile(cookieBytes);
+
+  const createdAt = Date.now();
+  const expiresAt = createdAt + COOKIE_SESSION_TTL_MS;
+  const root = process.env.DOWNLOAD_TEMP_DIR || os.tmpdir();
+  await fs.mkdir(root, { recursive: true });
+  const dir = await fs.mkdtemp(path.join(root, 'audiodrop-youtube-cookies-'));
+  const cookiesPath = path.join(dir, 'cookies.txt');
+  await fs.writeFile(cookiesPath, cookieBytes, { mode: 0o600 });
+
+  const session: YouTubeSession = {
+    id: crypto.randomUUID(),
+    kind: 'cookies',
+    cookiesPath,
+    createdAt,
+    expiresAt,
+  };
+
+  sessions.set(session.id, session);
+  scheduleExpiry(session);
+
+  return {
+    sessionId: session.id,
+    expiresAt: new Date(expiresAt).toISOString(),
+  };
+}
+
+async function refresh(session: Extract<YouTubeSession, { kind: 'oauth' }>) {
   const data = await tokenRequest({
     client_id: clientId(),
     client_secret: clientSecret(),
@@ -171,7 +230,11 @@ async function revoke(refreshToken: string) {
 
 async function removeSession(session: YouTubeSession, revokeToken = true) {
   sessions.delete(session.id);
-  if (revokeToken) await revoke(session.token.refreshToken);
+  if (session.kind === 'oauth') {
+    if (revokeToken) await revoke(session.token.refreshToken);
+  } else {
+    await fs.rm(path.dirname(session.cookiesPath), { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 function scheduleExpiry(session: YouTubeSession) {
@@ -184,7 +247,7 @@ function scheduleExpiry(session: YouTubeSession) {
 
 export async function getYouTubeSession(sessionId: unknown): Promise<YouTubeSession> {
   if (typeof sessionId !== 'string' || !sessionId) {
-    throw new Error('Connect YouTube with Google before using this feature.');
+    throw new Error('Connect YouTube before using this feature.');
   }
 
   const session = sessions.get(sessionId);
@@ -197,7 +260,7 @@ export async function getYouTubeSession(sessionId: unknown): Promise<YouTubeSess
     throw new Error('The temporary YouTube access session has expired. Connect YouTube again.');
   }
 
-  if (Date.now() + 60_000 >= session.token.expiresAt) {
+  if (session.kind === 'oauth' && Date.now() + 60_000 >= session.token.expiresAt) {
     try {
       await refresh(session);
     } catch {
@@ -210,6 +273,9 @@ export async function getYouTubeSession(sessionId: unknown): Promise<YouTubeSess
 }
 
 export function youtubeAuthForPython(session: YouTubeSession) {
+  if (session.kind === 'cookies') {
+    return { cookiesPath: session.cookiesPath };
+  }
   return {
     accessToken: session.token.accessToken,
     refreshToken: session.token.refreshToken,
